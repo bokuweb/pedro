@@ -1,12 +1,12 @@
 //! The visual shell, split by region. Each module adds an `impl Pedro` block
 //! with one `render_*` method.
 
+mod composer;
 mod rail;
 mod reader;
 mod sidebar;
 mod tab_bar;
 mod title_strip;
-mod top_bar;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{Div, Hsla, InteractiveElement as _, Pixels, Styled as _, div, px};

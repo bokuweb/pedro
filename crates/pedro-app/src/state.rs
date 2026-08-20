@@ -71,13 +71,43 @@ impl RailItem {
     }
 }
 
-/// A single clickable line in a sidebar section.
+/// What an entry is currently doing, shown as a dot and a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Working,
+    Done,
+    Failed,
+}
+
+impl Status {
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Working => "Working",
+            Status::Done => "Done",
+            Status::Failed => "Failed",
+        }
+    }
+}
+
+/// A single clickable entry in a sidebar section.
+///
+/// An entry with neither a [`meta`](Entry::meta) line nor a
+/// [`detail`](Entry::detail) is drawn as one compact line instead of three,
+/// which is what keeps an archive of forty rows readable next to a list of
+/// four.
 #[derive(Clone)]
 pub struct Entry {
     pub id: SharedString,
+    /// The title line.
     pub label: SharedString,
+    /// The muted line above the title: where the entry came from.
+    pub meta: Option<SharedString>,
+    /// Right of the meta line: an age, a page, a count.
+    pub trailing: Option<SharedString>,
+    /// Replaces `trailing` when the entry is busy or finished.
+    pub status: Option<Status>,
     pub icon: IconName,
-    /// Trailing muted text, e.g. a page count or a CLI version.
+    /// The faint line below the title, beside the icon.
     pub detail: Option<SharedString>,
     /// Whether clicking the entry should open it as a tab.
     pub openable: bool,
@@ -88,6 +118,9 @@ impl Entry {
         Self {
             id: id.into(),
             label: label.into(),
+            meta: None,
+            trailing: None,
+            status: None,
             icon: IconName::File,
             detail: None,
             openable: true,
@@ -96,6 +129,21 @@ impl Entry {
 
     fn icon(mut self, icon: IconName) -> Self {
         self.icon = icon;
+        self
+    }
+
+    fn meta(mut self, meta: impl Into<SharedString>) -> Self {
+        self.meta = Some(meta.into());
+        self
+    }
+
+    fn trailing(mut self, trailing: impl Into<SharedString>) -> Self {
+        self.trailing = Some(trailing.into());
+        self
+    }
+
+    fn status(mut self, status: Status) -> Self {
+        self.status = Some(status);
         self
     }
 
@@ -108,6 +156,11 @@ impl Entry {
         self.openable = false;
         self
     }
+
+    /// Whether this draws as one line rather than three.
+    pub fn is_compact(&self) -> bool {
+        self.meta.is_none() && self.detail.is_none()
+    }
 }
 
 /// A collapsible group of entries.
@@ -115,8 +168,6 @@ impl Entry {
 pub struct Section {
     pub title: SharedString,
     pub expanded: bool,
-    /// Whether to draw the "add" affordance in the section header.
-    pub addable: bool,
     pub entries: Vec<Entry>,
 }
 
@@ -125,14 +176,8 @@ impl Section {
         Self {
             title: title.into(),
             expanded: true,
-            addable: false,
             entries,
         }
-    }
-
-    fn addable(mut self) -> Self {
-        self.addable = true;
-        self
     }
 
     fn collapsed(mut self) -> Self {
@@ -177,22 +222,35 @@ impl Panel {
                 Section::new(
                     "Reading",
                     vec![
-                        Entry::new("book:tcp", "TCP/IP Illustrated").detail("p. 214"),
-                        Entry::new("book:sicp", "Structure and Interpretation").detail("p. 42"),
+                        Entry::new("book:tcp", "TCP/IP Illustrated")
+                            .meta("1094 pages")
+                            .trailing("now")
+                            .detail("tcp-ip-illustrated.pdf"),
+                        Entry::new("book:sicp", "Structure and Interpretation")
+                            .meta("657 pages")
+                            .status(Status::Working)
+                            .detail("sicp.pdf"),
                     ],
-                )
-                .addable(),
+                ),
                 Section::new(
                     "Recently added",
                     vec![
-                        Entry::new("book:crafting", "Crafting Interpreters"),
-                        Entry::new("book:ddia", "Designing Data-Intensive Applications"),
-                        Entry::new("book:rust", "Programming Rust"),
+                        Entry::new("book:crafting", "Crafting Interpreters")
+                            .meta("640 pages")
+                            .trailing("2h")
+                            .detail("crafting-interpreters.pdf"),
+                        Entry::new("book:ddia", "Designing Data-Intensive Applications")
+                            .meta("616 pages")
+                            .trailing("5h")
+                            .detail("ddia.pdf"),
                     ],
                 ),
                 Section::new(
                     "Finished",
-                    vec![Entry::new("book:pragmatic", "The Pragmatic Programmer")],
+                    vec![
+                        Entry::new("book:pragmatic", "The Pragmatic Programmer").trailing("3d"),
+                        Entry::new("book:rust", "Programming Rust").trailing("9d"),
+                    ],
                 )
                 .collapsed(),
             ],
@@ -216,16 +274,21 @@ impl Panel {
 
     fn chat() -> Self {
         Self::new(
-            vec![
-                Section::new(
-                    "Recent",
-                    vec![
-                        Entry::new("chat:1", "Why is the window scaled?").icon(IconName::Bot),
-                        Entry::new("chat:2", "Explain slow start").icon(IconName::Bot),
-                    ],
-                )
-                .addable(),
-            ],
+            vec![Section::new(
+                "Recent",
+                vec![
+                    Entry::new("chat:1", "Why is the window scaled?")
+                        .icon(IconName::Bot)
+                        .meta("TCP/IP Illustrated")
+                        .trailing("12m")
+                        .detail("p. 267"),
+                    Entry::new("chat:2", "Explain slow start")
+                        .icon(IconName::Bot)
+                        .meta("TCP/IP Illustrated")
+                        .status(Status::Working)
+                        .detail("p. 289"),
+                ],
+            )],
             "Select a passage while reading to ask about it.",
         )
     }
@@ -237,10 +300,10 @@ impl Panel {
                 vec![
                     Entry::new("hl:1", "Nagle's algorithm")
                         .icon(IconName::Star)
-                        .detail("p. 267"),
+                        .trailing("p. 267"),
                     Entry::new("hl:2", "Silly window syndrome")
                         .icon(IconName::Star)
-                        .detail("p. 271"),
+                        .trailing("p. 271"),
                 ],
             )],
             "Nothing highlighted yet.",
@@ -280,7 +343,7 @@ impl Panel {
                     .read_only();
 
                     match &agent.version {
-                        Some(version) => entry.detail(version.clone()),
+                        Some(version) => entry.trailing(version.clone()),
                         None => entry,
                     }
                 })

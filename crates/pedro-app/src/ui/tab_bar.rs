@@ -1,16 +1,22 @@
-//! Open documents, one tab each.
+//! Open documents, one tab each, with the page layout toggles on the trailing
+//! edge.
+//!
+//! The toggles used to have a bar of their own. Two horizontal bands above the
+//! page is one more than the reading area can spare, and the toggles are about
+//! the document the tabs name anyway.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{IconName, h_flex};
 
 use crate::app::Pedro;
 use crate::palette;
-use crate::state::OpenTab;
-use crate::ui::icon;
+use crate::state::{OpenTab, PageLayout};
+use crate::ui::{icon, square_button, vertical_rule};
 
 const HEIGHT: f32 = 44.;
 
@@ -27,11 +33,51 @@ impl Pedro {
             .id("tab-bar")
             .h(px(HEIGHT))
             .flex_shrink_0()
+            .items_center()
             .bg(palette::chrome())
             .border_b_1()
             .border_color(palette::border())
-            .overflow_x_scroll()
-            .children(tabs)
+            .child(
+                h_flex()
+                    .id("tabs")
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .children(tabs),
+            )
+            .child(vertical_rule(px(20.)))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .px(px(8.))
+                    .gap(px(2.))
+                    .child(self.render_layout_toggle(PageLayout::Single, cx))
+                    .child(self.render_layout_toggle(PageLayout::Spread, cx)),
+            )
+    }
+
+    fn render_layout_toggle(
+        &self,
+        layout: PageLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let active = self.layout == layout;
+        let label = layout.label();
+
+        square_button(px(28.), active)
+            .id(("layout", layout as usize))
+            .child(icon(
+                layout.icon(),
+                px(15.),
+                if active {
+                    palette::text()
+                } else {
+                    palette::text_faint()
+                },
+            ))
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| this.set_layout(layout, cx)))
     }
 
     fn render_tab(
@@ -51,14 +97,14 @@ impl Pedro {
             .gap(px(8.))
             .items_center()
             .cursor_pointer()
-            .border_r_1()
-            .border_color(palette::border())
             .bg(if active {
                 palette::canvas()
             } else {
                 palette::chrome()
             })
-            .when(!active, |this| this.hover(|this| this.bg(palette::rail())))
+            .when(!active, |this| {
+                this.hover(|this| this.bg(palette::row_hover()))
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(index, cx)))
             .child(icon(
                 IconName::File,

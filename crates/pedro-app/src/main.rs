@@ -7,8 +7,8 @@ mod state;
 mod ui;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, px,
-    size,
+    App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
@@ -31,6 +31,12 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(920.), px(600.))),
+                // The panels are translucent (see `palette`), so what is behind
+                // the window is part of the design rather than something to
+                // paint over. Blurred rather than plain transparency: reading
+                // is the point, and unblurred desktop under body text is not
+                // something anyone can read against.
+                window_background: WindowBackgroundAppearance::Blurred,
                 titlebar: Some(TitlebarOptions {
                     title: Some("Pedro".into()),
                     // The shell draws its own title strip so the panels can run

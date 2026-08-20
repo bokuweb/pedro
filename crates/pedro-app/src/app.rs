@@ -10,7 +10,7 @@ use gpui::{
     ParentElement as _, Render, Styled as _, Window, actions, div, px,
 };
 use gpui_component::input::InputState;
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
 
 use crate::palette;
@@ -21,13 +21,17 @@ actions!(pedro, [FocusSearch]);
 pub struct Pedro {
     focus_handle: FocusHandle,
     pub(crate) search: Entity<InputState>,
+    /// Where a question about the open document is typed.
+    pub(crate) composer: Entity<InputState>,
+    /// Whether the agent may search the web, chatbook's toggle. Per question
+    /// rather than per install, so it lives beside the field.
+    pub(crate) web_search: bool,
     pub(crate) active_rail: RailItem,
     pub(crate) panels: HashMap<RailItem, Panel>,
     pub(crate) tabs: Vec<OpenTab>,
     pub(crate) active_tab: Option<usize>,
     pub(crate) layout: PageLayout,
     pub(crate) agent_status: AgentStatus,
-    pub(crate) status_dismissed: bool,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
 }
@@ -37,6 +41,15 @@ impl Pedro {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         // Re-render as the query changes so the sidebar filter stays live.
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
+
+        // Grows with the question rather than scrolling inside two lines: a
+        // passage quoted back at the agent is easily a paragraph.
+        let composer = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 6)
+                .placeholder("Ask about this document…")
+        });
 
         let agent_status = AgentStatus::Detecting;
         let panels = RailItem::all()
@@ -53,13 +66,14 @@ impl Pedro {
         Self {
             focus_handle: cx.focus_handle(),
             search,
+            composer,
+            web_search: true,
             active_rail: RailItem::Library,
             panels,
             tabs,
             active_tab: Some(0),
             layout: PageLayout::Single,
             agent_status,
-            status_dismissed: false,
             window_drag_armed: false,
         }
     }
@@ -163,9 +177,23 @@ impl Pedro {
         }
     }
 
-    pub(crate) fn dismiss_status(&mut self, cx: &mut Context<Self>) {
-        self.status_dismissed = true;
+    pub(crate) fn toggle_web_search(&mut self, cx: &mut Context<Self>) {
+        self.web_search = !self.web_search;
         cx.notify();
+    }
+
+    /// Sends what is in the composer.
+    ///
+    /// Deliberately loud rather than silently doing nothing: the field, the
+    /// agent chip and the web toggle are all real, and the only missing piece
+    /// is the wiring to `pedro-core`.
+    pub(crate) fn ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let question = self.composer.read(cx).value().trim().to_string();
+        if question.is_empty() {
+            return;
+        }
+
+        window.push_notification("Asking is not wired to the reader yet.", cx);
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -202,9 +230,9 @@ impl Render for Pedro {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(self.render_top_bar(cx))
                             .child(self.render_tab_bar(cx))
-                            .child(div().flex_1().min_h_0().child(self.render_reader(cx))),
+                            .child(div().flex_1().min_h_0().child(self.render_reader(cx)))
+                            .child(self.render_composer(cx)),
                     ),
             )
     }
