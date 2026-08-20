@@ -7,6 +7,17 @@
 /// Builds a valid single-font PDF with one page per string, each page carrying
 /// that string as its only text.
 pub fn pdf_with_pages(pages: &[&str]) -> Vec<u8> {
+    build(pages, None)
+}
+
+/// The same, with a crop box inset from the media box by `inset` points on
+/// every side — the shape a printed book has, and the one that tells the two
+/// coordinate spaces of a page apart.
+pub fn pdf_with_crop_box(pages: &[&str], inset: f32) -> Vec<u8> {
+    build(pages, Some(inset))
+}
+
+fn build(pages: &[&str], crop_inset: Option<f32>) -> Vec<u8> {
     let font_id = 3 + 2 * pages.len();
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -22,8 +33,17 @@ pub fn pdf_with_pages(pages: &[&str]) -> Vec<u8> {
 
     for (index, text) in pages.iter().enumerate() {
         let contents_id = 4 + 2 * index;
+        let crop = match crop_inset {
+            Some(inset) => format!(
+                " /CropBox [{inset} {inset} {} {}]",
+                300.0 - inset,
+                200.0 - inset
+            ),
+            None => String::new(),
+        };
+
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents {contents_id} 0 R \
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200]{crop} /Contents {contents_id} 0 R \
              /Resources << /Font << /F1 {font_id} 0 R >> >> >>"
         ));
 

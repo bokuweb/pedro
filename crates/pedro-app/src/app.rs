@@ -416,6 +416,11 @@ impl Pedro {
                 let mut open = OpenDocument::new(document, size, page);
                 open.highlights = highlights;
                 tab.document = Some(open);
+
+                // The list holds the position now, so continuing where the
+                // reader left off is a scroll rather than a page number.
+                self.page_scroll
+                    .scroll_to_item(page as usize - 1, ScrollStrategy::Top);
             }
             Err(why) => {
                 tracing::error!(why, tab_id, "could not open the book");
@@ -486,8 +491,11 @@ impl Pedro {
                     let text = document
                         .page_text(page - 1)
                         .map_err(|err| err.to_string())?;
+                    let size = document
+                        .page_size(page - 1)
+                        .map_err(|err| err.to_string())?;
 
-                    Ok::<_, String>((image, text))
+                    Ok::<_, String>((image, text, size))
                 })
                 .await;
 
@@ -503,7 +511,14 @@ impl Pedro {
         &mut self,
         tab_id: &str,
         page: u32,
-        rendered: Result<(pedro_pdf::PageImage, pedro_pdf::PageText), String>,
+        rendered: Result<
+            (
+                pedro_pdf::PageImage,
+                pedro_pdf::PageText,
+                pedro_pdf::PageSize,
+            ),
+            String,
+        >,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
@@ -514,10 +529,10 @@ impl Pedro {
         };
 
         match rendered {
-            Ok((image, text)) => {
+            Ok((image, text, size)) => {
                 open.requested.remove(&page);
                 if let Some(image) = as_render_image(image) {
-                    open.store(page, Page { image, text });
+                    open.store(page, Page { image, size, text });
                 }
             }
             Err(why) => {
@@ -583,10 +598,19 @@ impl Pedro {
     pub(crate) fn extend_selection(
         &mut self,
         page: u32,
+        held: Option<gpui::MouseButton>,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
         if !self.selecting {
+            return;
+        }
+
+        // A release outside the page never reaches the page's own handler, so
+        // the first move afterwards is what tells us the drag is over. Without
+        // this the selection keeps growing under a button nobody is holding.
+        if held != Some(gpui::MouseButton::Left) {
+            self.finish_selection(cx);
             return;
         }
         let Some((x, y)) = self.on_the_page(page, position) else {

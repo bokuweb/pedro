@@ -18,3 +18,6 @@ pdfium-render = { version = "0.9.3", default-features = false, features = [
     "pdfium_latest",
     "thread_safe",
 ] }
+
+[dev-dependencies]
+image = "0.25"

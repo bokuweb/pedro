@@ -137,3 +137,86 @@ fn a_document_opens_from_a_file() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// The band of the page that has ink on it, as fractions of its height.
+fn inked_band(image: &pedro_pdf::PageImage) -> (f32, f32) {
+    let rows: Vec<u32> = (0..image.height)
+        .filter(|row| {
+            (0..image.width).any(|column| {
+                let at = ((row * image.width + column) * 4) as usize;
+                image.bytes.get(at).is_some_and(|blue| *blue < 128)
+            })
+        })
+        .collect();
+
+    let height = image.height as f32;
+    (
+        *rows.first().expect("a page with ink on it") as f32 / height,
+        *rows.last().expect("a page with ink on it") as f32 / height,
+    )
+}
+
+/// Where the character boxes say the ink is, as fractions of the page height.
+fn boxed_band(text: &pedro_pdf::PageText) -> (f32, f32) {
+    let top = text
+        .chars
+        .iter()
+        .map(|character| character.rect.top)
+        .fold(f32::MAX, f32::min);
+    let bottom = text
+        .chars
+        .iter()
+        .map(|character| character.rect.bottom)
+        .fold(f32::MIN, f32::max);
+
+    (top, bottom)
+}
+
+/// A page's characters are reported in the coordinates of its media box, while
+/// the page is rasterised from its crop box. A book with trim marks — which is
+/// most printed books — has one inset from the other, and normalising against
+/// the wrong one puts every mark above the words it belongs to.
+///
+/// Comparing the middle of what the boxes claim with the middle of the ink is
+/// what catches it: an offset moves the claim without moving the ink.
+#[test]
+fn character_boxes_sit_on_the_ink_of_a_cropped_page() {
+    let inset = 12.0;
+    let document = Document::from_bytes(pedro_pdf::fixtures::pdf_with_crop_box(&["Hello"], inset))
+        .expect("pdfium and a readable fixture");
+
+    let image = document.render_page(0, 4.0).expect("page 0 exists");
+    let text = document.page_text(0).expect("page 0 exists");
+
+    let (ink_top, ink_bottom) = inked_band(&image);
+    let (box_top, box_bottom) = boxed_band(&text);
+
+    let ink_middle = (ink_top + ink_bottom) / 2.0;
+    let box_middle = (box_top + box_bottom) / 2.0;
+
+    // The inset is 12 of 200 points: an error of that size is 0.06 of the page,
+    // which is ten times this tolerance.
+    assert!(
+        (ink_middle - box_middle).abs() < 0.006,
+        "the boxes are centred at {box_middle:.4} and the ink at {ink_middle:.4}"
+    );
+}
+
+/// The same page with no crop box, so a failure above is about the crop box
+/// rather than about a fixture that draws nothing.
+#[test]
+fn character_boxes_sit_on_the_ink_of_a_plain_page() {
+    let document =
+        Document::from_bytes(pdf_with_pages(&["Hello"])).expect("pdfium and a readable fixture");
+
+    let image = document.render_page(0, 4.0).expect("page 0 exists");
+    let text = document.page_text(0).expect("page 0 exists");
+
+    let (ink_top, ink_bottom) = inked_band(&image);
+    let (box_top, box_bottom) = boxed_band(&text);
+
+    assert!(
+        ((ink_top + ink_bottom) / 2.0 - (box_top + box_bottom) / 2.0).abs() < 0.006,
+        "the boxes and the ink disagree on a page with nothing to confuse them"
+    );
+}

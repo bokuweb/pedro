@@ -34,6 +34,10 @@ const KEEP: u32 = 4;
 /// A page that has been rasterised, and the text that is on it.
 pub struct Page {
     pub image: Arc<RenderImage>,
+    /// The page's own size in points. Pages of one book are not all the same
+    /// shape, and a page drawn in another page's proportions is a page whose
+    /// character boxes no longer land on its words.
+    pub size: PageSize,
     /// Every character and where it sits, which is what turns a drag into a
     /// passage.
     pub text: PageText,
@@ -110,9 +114,14 @@ impl OpenDocument {
         self.pages.retain(|number, _| number.abs_diff(here) <= KEEP);
     }
 
-    /// How wide the page is when drawn `height` logical pixels tall.
-    pub fn width_at(&self, height: f32) -> f32 {
-        width_at(self.size, height)
+    /// How wide `page` is when drawn `height` logical pixels tall: its own
+    /// shape once it has been read, the first page's before that — which is
+    /// what the rows are sized by before anything has been read at all.
+    pub fn width_of(&self, page: u32, height: f32) -> f32 {
+        match self.page(page) {
+            Some(held) => width_at(held.size, height),
+            None => width_at(self.size, height),
+        }
     }
 
     /// The scale to rasterise at so a page drawn `height` pixels tall has a

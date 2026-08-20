@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use pdfium_render::prelude::{PdfBitmapFormat, PdfDocument, PdfPage, PdfPageRenderRotation};
+use pdfium_render::prelude::{
+    PdfBitmapFormat, PdfDocument, PdfPage, PdfPageRenderRotation, PdfRect,
+};
 
 use crate::PdfError;
 use crate::library::{in_use, library};
@@ -111,6 +113,40 @@ impl Document {
         })
     }
 
+    /// The page's box in PDF points, for working out why a coordinate is where
+    /// The raw pdfium box of one character, in points: `(left, bottom, right,
+    /// The first few text segments of a page: what pdfium's own selection API
+    /// The page's declared boxes, for working out which space a coordinate is
+    /// in. Each is `(left, bottom, right, top)` in points.
+    pub fn page_boxes(
+        &self,
+        index: u32,
+    ) -> Result<Vec<(&'static str, f32, f32, f32, f32)>, PdfError> {
+        let _guard = in_use();
+        let page = self.page(index)?;
+        let boundaries = page.boundaries();
+
+        let mut boxes = Vec::new();
+        for (name, found) in [
+            ("media", boundaries.media()),
+            ("crop", boundaries.crop()),
+            ("bounding", boundaries.bounding()),
+        ] {
+            if let Ok(boundary) = found {
+                let bounds = boundary.bounds;
+                boxes.push((
+                    name,
+                    bounds.left().value,
+                    bounds.bottom().value,
+                    bounds.right().value,
+                    bounds.top().value,
+                ));
+            }
+        }
+
+        Ok(boxes)
+    }
+
     /// Rasterises one page at `scale` times its natural size.
     ///
     /// The caller decides the scale because the page's size in points and the
@@ -143,7 +179,7 @@ impl Document {
 
     fn text_of(&self, index: u32) -> Result<PageText, PdfError> {
         let page = self.page(index)?;
-        let bounds = page.page_size();
+        let bounds = rendered_box(&page);
         let text = page.text()?;
 
         let mut string = String::new();
@@ -248,6 +284,22 @@ impl Document {
                 page_count: self.count(),
             })
     }
+}
+
+/// The box a page is rendered into, in the coordinate space its characters are
+/// reported in.
+///
+/// pdfium rasterises the crop box but reports character positions in media box
+/// coordinates, and a page whose crop box is inset — a book with trim marks,
+/// which is most printed books — has an origin in one that is not the origin in
+/// the other. Normalising against the page size, which carries the crop box's
+/// dimensions with its origin flattened to zero, puts every character off by
+/// the inset: marks land above the words they belong to.
+fn rendered_box(page: &PdfPage<'_>) -> PdfRect {
+    page.boundaries()
+        .crop()
+        .map(|crop| crop.bounds)
+        .unwrap_or_else(|_| page.page_size())
 }
 
 #[cfg(test)]

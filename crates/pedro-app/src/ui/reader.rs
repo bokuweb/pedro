@@ -69,7 +69,11 @@ impl Pedro {
             return div().h(px(PAGE_HEIGHT + GAP)).into_any_element();
         };
 
-        let width = open.width_at(PAGE_HEIGHT);
+        // The page's own shape where it is known. Books whose pages differ in
+        // size — a cover, a fold-out — would otherwise be stretched into the
+        // first page's proportions, and a mark drawn in fractions of a
+        // stretched page does not sit on its words.
+        let width = open.width_of(page, PAGE_HEIGHT);
         let marks: Vec<Rect> = open
             .highlights_on(page)
             .flat_map(|highlight| highlight.rects.iter().copied())
@@ -107,14 +111,18 @@ impl Pedro {
             .child(sheet)
             .child(
                 canvas(
-                    move |drawn, _, _| {
+                    |_, _, _| {},
+                    // Recorded when the page is painted rather than when it is
+                    // laid out. A scrolling list lays its rows out in its own
+                    // space and translates them on the way to the screen, so
+                    // prepaint bounds are in neither the space the mouse is
+                    // reported in nor the space the page is drawn in.
+                    move |drawn, _, _, _| {
                         bounds.borrow_mut().insert(page, drawn);
                     },
-                    |_, _, _, _| {},
                 )
                 // Without a size of its own a canvas is laid out as nothing,
-                // and the bounds it reports are nothing too — which is what
-                // made every drag fall outside the page.
+                // and the bounds it reports are nothing too.
                 .absolute()
                 .size_full(),
             )
@@ -125,7 +133,7 @@ impl Pedro {
                 }),
             )
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                this.extend_selection(page, event.position, cx)
+                this.extend_selection(page, event.pressed_button, event.position, cx)
             }))
             .on_mouse_up(
                 MouseButton::Left,
