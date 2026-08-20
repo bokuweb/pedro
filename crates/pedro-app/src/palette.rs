@@ -26,23 +26,23 @@ fn veiled(hex: u32, alpha: f32) -> Hsla {
 /// The column the pages sit in. Denser than the panels: this is what body text
 /// and a page's own shadow are read against.
 pub fn canvas() -> Hsla {
-    veiled(0x1d1229, 0.58)
+    veiled(0x1d1229, 0.74)
 }
 
 /// The title strip and the tab bar.
 pub fn chrome() -> Hsla {
-    veiled(0x17101f, 0.34)
+    veiled(0x17101f, 0.5)
 }
 
 /// The narrow icon column on the far left. The most transparent surface in the
 /// window, so the eye reads it as the edge of the glass rather than as a panel.
 pub fn rail() -> Hsla {
-    veiled(0x160e1f, 0.4)
+    veiled(0x160e1f, 0.66)
 }
 
 /// The panel between the rail and the reader.
 pub fn sidebar() -> Hsla {
-    veiled(0x221530, 0.36)
+    veiled(0x221530, 0.58)
 }
 
 /// A row in the sidebar list.

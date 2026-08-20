@@ -4170,6 +4170,8 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "pedro-agent",
+ "pedro-core",
+ "time",
  "tracing",
  "tracing-subscriber",
 ]

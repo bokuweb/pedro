@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{IconName, WindowExt as _, h_flex, v_flex};
+use gpui_component::{IconName, h_flex, v_flex};
 
 use crate::app::Pedro;
 use crate::palette;
@@ -34,18 +34,21 @@ impl Pedro {
             .bg(palette::sidebar())
             .border_r_1()
             .border_color(palette::border())
-            .child(self.render_panel_header())
+            .child(self.render_panel_header(cx))
             .child(self.render_search())
+            .children(self.render_notice())
             .child(self.render_sections(cx))
             .child(self.render_agent_footer())
     }
 
     /// What the panel is, with the affordance to add to it.
-    fn render_panel_header(&self) -> impl IntoElement + use<> {
+    fn render_panel_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let title = self.active_rail.title();
         let hint = self.active_rail.hint();
 
-        h_flex()
+        // This row runs along the top edge where a title bar would have been,
+        // so it does a title bar's other job (see `ui::window_drag`).
+        let header = h_flex()
             .id("panel-header")
             .h(px(46.))
             .px(px(14.))
@@ -71,7 +74,47 @@ impl Pedro {
                     .child(icon(IconName::Info, px(15.), palette::text_faint()))
                     .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx)),
             )
-            .child(render_add_button())
+            .child(self.render_add_button(cx));
+
+        self.draggable(header, cx)
+    }
+
+    /// The last thing that went wrong, where the reader was looking when it
+    /// did. A file that could not be added is about the list it is missing
+    /// from, so it belongs here rather than in a notification that floats away.
+    fn render_notice(&self) -> Option<impl IntoElement + use<>> {
+        let notice = self.notice.clone()?;
+
+        Some(
+            div()
+                .mx(px(INSET))
+                .mb(px(6.))
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(8.))
+                .bg(palette::danger().opacity(0.14))
+                .text_size(px(11.))
+                .text_color(palette::danger())
+                .child(notice),
+        )
+    }
+
+    /// The plus in the panel header.
+    fn render_add_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("panel-add")
+            .size(px(24.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(|this| this.bg(palette::row_hover()))
+            .child(icon(IconName::Plus, px(15.), palette::text_muted()))
+            .tooltip(move |window, cx| Tooltip::new("Add a document").build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.pick_documents(cx);
+            }))
     }
 
     fn render_search(&self) -> impl IntoElement + use<> {
@@ -401,24 +444,4 @@ fn status_color(status: Status) -> Hsla {
         Status::Done => palette::success(),
         Status::Failed => palette::danger(),
     }
-}
-
-/// The plus in the panel header.
-fn render_add_button() -> impl IntoElement {
-    div()
-        .id("panel-add")
-        .size(px(24.))
-        .rounded(px(7.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .hover(|this| this.bg(palette::row_hover()))
-        .child(icon(IconName::Plus, px(15.), palette::text_muted()))
-        .tooltip(move |window, cx| Tooltip::new("Add a document").build(window, cx))
-        .on_click(|_, window, cx| {
-            // Deliberately loud: the affordance exists in the layout before
-            // the document store is wired to it.
-            cx.stop_propagation();
-            window.push_notification("Adding documents is not implemented yet.", cx);
-        })
 }

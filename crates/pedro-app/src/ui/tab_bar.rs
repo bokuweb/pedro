@@ -29,7 +29,7 @@ impl Pedro {
             .map(|(index, tab)| self.render_tab(index, tab, cx))
             .collect();
 
-        h_flex()
+        let bar = h_flex()
             .id("tab-bar")
             .h(px(HEIGHT))
             .flex_shrink_0()
@@ -54,7 +54,11 @@ impl Pedro {
                     .gap(px(2.))
                     .child(self.render_layout_toggle(PageLayout::Single, cx))
                     .child(self.render_layout_toggle(PageLayout::Spread, cx)),
-            )
+            );
+
+        // The other row along the top edge, and the one a reader is most likely
+        // to reach for when there is no title bar to grab.
+        self.draggable(bar, cx)
     }
 
     fn render_layout_toggle(

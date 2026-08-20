@@ -7,6 +7,9 @@
 use gpui::SharedString;
 use gpui_component::IconName;
 use pedro_agent::DiscoveredAgent;
+use pedro_core::model::Book;
+
+use crate::library::{Library, how_long_ago, title_of};
 
 /// A destination in the icon rail on the far left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,11 +183,6 @@ impl Section {
         }
     }
 
-    fn collapsed(mut self) -> Self {
-        self.expanded = false;
-        self
-    }
-
     /// The entries whose label matches `query`, which may be empty.
     pub fn matching(&self, query: &str) -> Vec<&Entry> {
         if query.is_empty() {
@@ -215,47 +213,24 @@ impl Panel {
         }
     }
 
-    /// Placeholder library until documents are read from disk.
-    pub fn library() -> Self {
-        Self::new(
-            vec![
-                Section::new(
-                    "Reading",
-                    vec![
-                        Entry::new("book:tcp", "TCP/IP Illustrated")
-                            .meta("1094 pages")
-                            .trailing("now")
-                            .detail("tcp-ip-illustrated.pdf"),
-                        Entry::new("book:sicp", "Structure and Interpretation")
-                            .meta("657 pages")
-                            .status(Status::Working)
-                            .detail("sicp.pdf"),
-                    ],
-                ),
-                Section::new(
-                    "Recently added",
-                    vec![
-                        Entry::new("book:crafting", "Crafting Interpreters")
-                            .meta("640 pages")
-                            .trailing("2h")
-                            .detail("crafting-interpreters.pdf"),
-                        Entry::new("book:ddia", "Designing Data-Intensive Applications")
-                            .meta("616 pages")
-                            .trailing("5h")
-                            .detail("ddia.pdf"),
-                    ],
-                ),
-                Section::new(
-                    "Finished",
-                    vec![
-                        Entry::new("book:pragmatic", "The Pragmatic Programmer").trailing("3d"),
-                        Entry::new("book:rust", "Programming Rust").trailing("9d"),
-                    ],
-                )
-                .collapsed(),
-            ],
-            "No documents yet. Add a PDF to get started.",
-        )
+    /// The books on disk, split by whether the reader has been into them.
+    ///
+    /// Two sections rather than one because "where was I" and "what did I add"
+    /// are different questions, and a library of forty books answers neither
+    /// as one flat list.
+    pub fn library(library: &Library) -> Self {
+        let (reading, unread): (Vec<&Book>, Vec<&Book>) = library
+            .books()
+            .iter()
+            .partition(|book| book.reading.is_some());
+
+        let sections = [("Reading", reading), ("Recently added", unread)]
+            .into_iter()
+            .filter(|(_, books)| !books.is_empty())
+            .map(|(title, books)| Section::new(title, books.into_iter().map(row_for).collect()))
+            .collect();
+
+        Self::new(sections, library.empty_message())
     }
 
     fn reader() -> Self {
@@ -366,15 +341,28 @@ impl Panel {
         )
     }
 
-    pub fn for_rail_item(item: RailItem, status: &AgentStatus) -> Self {
+    pub fn for_rail_item(item: RailItem, status: &AgentStatus, library: &Library) -> Self {
         match item {
-            RailItem::Library => Self::library(),
+            RailItem::Library => Self::library(library),
             RailItem::Reader => Self::reader(),
             RailItem::Chat => Self::chat(),
             RailItem::Highlights => Self::highlights(),
             RailItem::Agents => Self::agents(status),
             RailItem::Settings => Self::settings(),
         }
+    }
+}
+
+/// One book as a sidebar row: how big it is and when it was last touched,
+/// its title, and the file it actually is.
+fn row_for(book: &Book) -> Entry {
+    let entry = Entry::new(format!("book:{}", book.id), title_of(book))
+        .meta(format!("{} pages", book.page_count))
+        .detail(book.file_name.clone());
+
+    match &book.reading {
+        Some(reading) => entry.trailing(format!("p. {}", reading.page)),
+        None => entry.trailing(how_long_ago(book.updated_at)),
     }
 }
 

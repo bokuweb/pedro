@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 pedro-agent.workspace = true
+pedro-core.workspace = true
 
 anyhow.workspace = true
 gpui.workspace = true
@@ -19,3 +20,5 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+time = "0.3"

@@ -2,6 +2,7 @@
 //! installed.
 
 mod app;
+mod library;
 mod palette;
 mod state;
 mod ui;
@@ -39,10 +40,12 @@ fn main() {
                 window_background: WindowBackgroundAppearance::Blurred,
                 titlebar: Some(TitlebarOptions {
                     title: Some("Pedro".into()),
-                    // The shell draws its own title strip so the panels can run
-                    // to the top edge of the window.
+                    // There is no title bar and no strip standing in for one.
+                    // The panels run to the top edge of the window and the
+                    // traffic lights sit in the rail, which is padded to clear
+                    // them; dragging is handled by the rows they sit beside.
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(11.))),
+                    traffic_light_position: Some(point(px(6.), px(14.))),
                 }),
                 ..Default::default()
             };

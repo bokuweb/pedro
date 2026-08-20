@@ -4,16 +4,20 @@
 //! that this file stays about state transitions rather than styling.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, actions, div, px,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Window,
+    actions, div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
+use pedro_core::model::Book;
+use pedro_core::store::Store;
 
+use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::state::{AgentStatus, Entry, OpenTab, PageLayout, Panel, RailItem};
 
@@ -33,6 +37,11 @@ pub struct Pedro {
     pub(crate) active_tab: Option<usize>,
     pub(crate) layout: PageLayout,
     pub(crate) agent_status: AgentStatus,
+    pub(crate) library: Library,
+    /// The last thing that went wrong where the reader was looking. Shown in
+    /// the sidebar rather than as a notification: a file that could not be
+    /// added is about the list it is missing from.
+    pub(crate) notice: Option<SharedString>,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
 }
@@ -53,11 +62,13 @@ impl Pedro {
         });
 
         let agent_status = AgentStatus::Detecting;
+        let library = Library::Opening;
         let panels = RailItem::all()
-            .map(|item| (item, Panel::for_rail_item(item, &agent_status)))
+            .map(|item| (item, Panel::for_rail_item(item, &agent_status, &library)))
             .collect();
 
         Self::detect_agents(cx);
+        Self::open_library(cx);
 
         let tabs = vec![OpenTab {
             id: "book:tcp".into(),
@@ -75,6 +86,8 @@ impl Pedro {
             active_tab: Some(0),
             layout: PageLayout::Single,
             agent_status,
+            library,
+            notice: None,
             window_drag_armed: false,
         }
     }
@@ -97,6 +110,141 @@ impl Pedro {
         self.agent_status = AgentStatus::Done(agents);
         self.panels
             .insert(RailItem::Agents, Panel::agents(&self.agent_status));
+        cx.notify();
+    }
+
+    /// Opens the library off the UI thread: it touches the disk, and on a first
+    /// run it creates the database.
+    fn open_library(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async {
+                    // Errors are flattened to strings here rather than carried
+                    // out of the thread: what the shell does with any of them
+                    // is the same, and it saves demanding `Send` of every error
+                    // type in two other crates.
+                    let store = Store::open_default().map_err(|err| err.to_string())?;
+                    let books = store.books().map_err(|err| err.to_string())?;
+                    Ok::<_, String>((store, books))
+                })
+                .await;
+
+            this.update(cx, |this, cx| this.library_opened(opened, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn library_opened(
+        &mut self,
+        opened: Result<(Store, Vec<Book>), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.library = match opened {
+            Ok((store, books)) => {
+                tracing::info!(books = books.len(), "opened the library");
+                Library::Ready {
+                    store: SharedStore::new(store),
+                    books,
+                }
+            }
+            Err(why) => {
+                tracing::error!(why, "could not open the library");
+                Library::Failed(why.into())
+            }
+        };
+
+        self.refresh_library_panel(cx);
+    }
+
+    /// Asks for PDFs and adds whatever comes back.
+    pub(crate) fn pick_documents(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            // A cancelled prompt and a failed one both mean nothing was chosen.
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+
+            this.update(cx, |this, cx| this.add_documents(paths, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Adds documents to the library and reloads the list.
+    ///
+    /// Reading a book takes as long as extracting the text of every page, so
+    /// this runs in the background and the list simply arrives when it is done.
+    pub(crate) fn add_documents(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        self.notice = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let added = cx
+                .background_executor()
+                .spawn(async move {
+                    let store = store.lock();
+                    // One bad file does not cost the reader the others: it is
+                    // reported, and the rest are still added.
+                    let mut failures = Vec::new();
+                    for path in paths {
+                        if let Err(err) = store.add_document(&path) {
+                            failures.push(format!("{}: {err}", path.display()));
+                        }
+                    }
+
+                    store
+                        .books()
+                        .map_err(|err| err.to_string())
+                        .map(|books| (books, failures))
+                })
+                .await;
+
+            this.update(cx, |this, cx| this.documents_added(added, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn documents_added(
+        &mut self,
+        added: Result<(Vec<Book>, Vec<String>), String>,
+        cx: &mut Context<Self>,
+    ) {
+        match added {
+            Ok((books, failures)) => {
+                if let Library::Ready { books: held, .. } = &mut self.library {
+                    *held = books;
+                }
+                self.notice = failures.first().map(|failure| {
+                    tracing::warn!(failure, "could not add a document");
+                    failure.clone().into()
+                });
+            }
+            Err(why) => {
+                tracing::error!(why, "could not reload the library");
+                self.notice = Some(why.into());
+            }
+        }
+
+        self.refresh_library_panel(cx);
+    }
+
+    fn refresh_library_panel(&mut self, cx: &mut Context<Self>) {
+        self.panels
+            .insert(RailItem::Library, Panel::library(&self.library));
         cx.notify();
     }
 
@@ -219,17 +367,11 @@ impl Render for Pedro {
             .size_full()
             .text_color(cx.theme().foreground)
             .text_size(px(15.))
-            // Fullscreen has no traffic lights to clear and nowhere to drag the
-            // window to, so the strip would be a band of nothing across the top
-            // of the screen. The tab bar becomes the first row instead.
-            .when(!window.is_fullscreen(), |this| {
-                this.child(self.render_title_strip(cx))
-            })
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_rail(cx))
+                    .child(self.render_rail(window, cx))
                     .child(self.render_sidebar(cx))
                     .child(
                         v_flex()
