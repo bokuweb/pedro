@@ -9,6 +9,7 @@ use gpui_component::IconName;
 use pedro_agent::DiscoveredAgent;
 use pedro_core::model::Book;
 
+use crate::document::OpenDocument;
 use crate::library::{Library, how_long_ago, title_of};
 
 /// A destination in the icon rail on the far left.
@@ -423,10 +424,25 @@ impl PageLayout {
 }
 
 /// A document opened in the tab bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenTab {
     pub id: SharedString,
     pub label: SharedString,
+    /// The book itself, once pdfium has opened it. `None` while it is being
+    /// read, and on a tab that is not a book at all.
+    pub document: Option<OpenDocument>,
+    /// Why the book could not be opened, if it could not.
+    pub error: Option<SharedString>,
+}
+
+impl OpenTab {
+    pub fn new(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            document: None,
+            error: None,
+        }
+    }
 }
 
 #[cfg(test)]

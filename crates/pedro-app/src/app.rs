@@ -16,12 +16,21 @@ use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
 use pedro_core::model::Book;
 use pedro_core::store::Store;
+use pedro_pdf::{Document, PageSize};
 
+use crate::document::{OpenDocument, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::state::{AgentStatus, Entry, OpenTab, PageLayout, Panel, RailItem};
 
-actions!(pedro, [FocusSearch]);
+actions!(pedro, [FocusSearch, NextPage, PreviousPage]);
+
+/// How tall a page is drawn, in logical pixels.
+///
+/// Fixed for now: fitting to the window means measuring it, and measuring it
+/// means re-rasterising every page on every resize. A constant gets real pages
+/// on screen; the zoom control is what will replace it.
+pub(crate) const PAGE_HEIGHT: f32 = 640.;
 
 pub struct Pedro {
     focus_handle: FocusHandle,
@@ -70,11 +79,6 @@ impl Pedro {
         Self::detect_agents(cx);
         Self::open_library(cx);
 
-        let tabs = vec![OpenTab {
-            id: "book:tcp".into(),
-            label: "TCP/IP Illustrated".into(),
-        }];
-
         Self {
             focus_handle: cx.focus_handle(),
             search,
@@ -82,8 +86,8 @@ impl Pedro {
             web_search: true,
             active_rail: RailItem::Library,
             panels,
-            tabs,
-            active_tab: Some(0),
+            tabs: Vec::new(),
+            active_tab: None,
             layout: PageLayout::Single,
             agent_status,
             library,
@@ -282,18 +286,183 @@ impl Pedro {
 
         let existing = self.tabs.iter().position(|tab| tab.id == entry.id);
         self.active_tab = Some(existing.unwrap_or_else(|| {
-            self.tabs.push(OpenTab {
-                id: entry.id.clone(),
-                label: entry.label.clone(),
-            });
+            self.tabs
+                .push(OpenTab::new(entry.id.clone(), entry.label.clone()));
             self.tabs.len() - 1
         }));
+
+        // Already open means already read: only a new tab has a book to load.
+        if existing.is_none()
+            && let Some(book_id) = entry.id.strip_prefix("book:")
+        {
+            self.load_book(book_id.to_owned(), cx);
+        }
+
         cx.notify();
+    }
+
+    /// Reads a book off disk and rasterises its first page.
+    fn load_book(&mut self, book_id: String, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+        let Some(book) = self
+            .library
+            .books()
+            .iter()
+            .find(|book| book.id == book_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let path = store.lock().document_path(&book);
+        let page = book.reading.as_ref().map_or(1, |reading| reading.page);
+        let tab_id: SharedString = format!("book:{book_id}").into();
+
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move {
+                    let document = Document::open(&path).map_err(|err| err.to_string())?;
+                    // Every page is laid out against the first one's size, so
+                    // it is read here rather than on the UI thread later.
+                    let size = document.page_size(0).map_err(|err| err.to_string())?;
+                    Ok::<_, String>((document, size))
+                })
+                .await;
+
+            this.update(cx, |this, cx| this.book_loaded(&tab_id, opened, page, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn book_loaded(
+        &mut self,
+        tab_id: &str,
+        opened: Result<(Document, PageSize), String>,
+        page: u32,
+        cx: &mut Context<Self>,
+    ) {
+        // The reader may have closed the tab while the book was being read.
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+
+        match opened {
+            Ok((document, size)) => {
+                tab.error = None;
+                tab.document = Some(OpenDocument::new(document, size, page));
+            }
+            Err(why) => {
+                tracing::error!(why, tab_id, "could not open the book");
+                tab.error = Some(why.into());
+            }
+        }
+
+        self.render_visible_page(cx);
+        cx.notify();
+    }
+
+    /// Rasterises the page the reader is on, unless it is already drawn.
+    fn render_visible_page(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab.and_then(|index| self.tabs.get(index)) else {
+            return;
+        };
+        let Some(open) = &tab.document else {
+            return;
+        };
+        if open.visible().is_some() {
+            return;
+        }
+
+        let tab_id = tab.id.clone();
+        let page = open.page;
+        let document = open.document.clone();
+        let scale = open.scale_for(PAGE_HEIGHT);
+
+        cx.spawn(async move |this, cx| {
+            let rendered = cx
+                .background_executor()
+                .spawn(async move {
+                    document
+                        .render_page(page - 1, scale)
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.page_rendered(&tab_id, page, rendered, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn page_rendered(
+        &mut self,
+        tab_id: &str,
+        page: u32,
+        rendered: Result<pedro_pdf::PageImage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let Some(open) = &mut tab.document else {
+            return;
+        };
+
+        match rendered {
+            Ok(image) => {
+                open.rendered =
+                    as_render_image(image).map(|image| crate::document::Rendered { page, image });
+            }
+            Err(why) => {
+                tracing::error!(why, page, "could not render a page");
+                tab.error = Some(why.into());
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Moves `by` pages and draws what that lands on.
+    pub(crate) fn turn_page(&mut self, by: i64, cx: &mut Context<Self>) {
+        let Some(open) = self
+            .active_tab
+            .and_then(|index| self.tabs.get_mut(index))
+            .and_then(|tab| tab.document.as_mut())
+        else {
+            return;
+        };
+
+        if open.turn(by) {
+            self.render_visible_page(cx);
+            cx.notify();
+        }
+    }
+
+    fn next_page(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
+        self.turn_page(1, cx);
+    }
+
+    fn previous_page(&mut self, _: &PreviousPage, _: &mut Window, cx: &mut Context<Self>) {
+        self.turn_page(-1, cx);
+    }
+
+    /// The book the reader is looking at, if any.
+    pub(crate) fn open_document(&self) -> Option<&OpenDocument> {
+        self.active_tab()?.document.as_ref()
     }
 
     pub(crate) fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active_tab = Some(index);
+            // Its page may never have been drawn, or may have been drawn at a
+            // page the reader has since turned away from in another tab.
+            self.render_visible_page(cx);
             cx.notify();
         }
     }
@@ -364,6 +533,8 @@ impl Render for Pedro {
             .key_context("Pedro")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::next_page))
+            .on_action(cx.listener(Self::previous_page))
             .size_full()
             .text_color(cx.theme().foreground)
             .text_size(px(15.))

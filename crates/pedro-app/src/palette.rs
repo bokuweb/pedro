@@ -127,11 +127,6 @@ pub fn page() -> Hsla {
     rgb(0xf7f7f5).into()
 }
 
-/// Placeholder bars drawn on a page we cannot render yet.
-pub fn page_placeholder() -> Hsla {
-    rgb(0xdcdcd8).into()
-}
-
 /// Points `gpui-component`'s theme at the palette above.
 pub fn apply_to_theme(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);

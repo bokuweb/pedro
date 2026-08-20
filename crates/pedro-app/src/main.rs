@@ -2,6 +2,7 @@
 //! installed.
 
 mod app;
+mod document;
 mod library;
 mod palette;
 mod state;
@@ -14,7 +15,7 @@ use gpui::{
 use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
 
-use crate::app::{FocusSearch, Pedro};
+use crate::app::{FocusSearch, NextPage, Pedro, PreviousPage};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -26,7 +27,14 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             palette::apply_to_theme(cx);
-            cx.bind_keys([KeyBinding::new("cmd-k", FocusSearch, None)]);
+            cx.bind_keys([
+                KeyBinding::new("cmd-k", FocusSearch, None),
+                // Bound in the shell's own context so that the text field's
+                // bindings, which sit deeper, keep the arrows for the caret
+                // while the reader is typing a question.
+                KeyBinding::new("right", NextPage, Some("Pedro")),
+                KeyBinding::new("left", PreviousPage, Some("Pedro")),
+            ]);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {

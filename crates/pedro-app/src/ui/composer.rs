@@ -158,7 +158,12 @@ impl Pedro {
     /// What the question is about: the document, and the place in it.
     fn render_context_line(&self) -> impl IntoElement + use<> {
         let document: SharedString = match self.active_tab() {
-            Some(tab) => tab.label.clone(),
+            // The page matters as much as the book: a question is about the
+            // passage in front of the reader, not about the whole volume.
+            Some(tab) => match self.open_document() {
+                Some(open) => format!("{} · {}", tab.label, open.position()).into(),
+                None => tab.label.clone(),
+            },
             None => "No document open".into(),
         };
 

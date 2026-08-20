@@ -1,92 +1,151 @@
 //! The document canvas.
 //!
-//! Page rendering is not wired up yet — pedro has not committed to a PDF
-//! backend — so pages are drawn as sheets with placeholder text blocks. The
-//! layout, spread toggle and empty state are real.
+//! A page is a rasterised image of a real PDF page, drawn at its own aspect
+//! ratio on white paper. Until it arrives — a book is read off disk and its
+//! first page rasterised in the background — the same sheet is drawn empty,
+//! which keeps the layout from jumping when the page lands in it.
 
-use gpui::{Context, IntoElement, ParentElement as _, Styled as _, div, px, relative};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, div, img, px,
+};
 use gpui_component::{IconName, h_flex, v_flex};
 
-use crate::app::Pedro;
+use crate::app::{PAGE_HEIGHT, Pedro};
 use crate::palette;
 use crate::state::PageLayout;
 use crate::ui::icon;
 
-const PAGE_WIDTH: f32 = 420.;
-const PAGE_HEIGHT: f32 = 560.;
-
-/// Relative widths of the placeholder lines on a page, so the block reads as
-/// prose rather than a uniform grid.
-const LINE_WIDTHS: [f32; 12] = [
-    0.95, 0.88, 0.92, 0.7, 0.94, 0.86, 0.9, 0.62, 0.93, 0.89, 0.84, 0.45,
-];
-
 impl Pedro {
-    pub(crate) fn render_reader(&self, _cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let Some(tab) = self.active_tab() else {
             return render_empty_state().into_any_element();
         };
 
-        let pages = match self.layout {
-            PageLayout::Single => 1,
-            PageLayout::Spread => 2,
+        if let Some(why) = &tab.error {
+            return render_failure(tab.label.clone(), why.clone()).into_any_element();
+        }
+
+        let Some(open) = &tab.document else {
+            return render_sheet(PAGE_HEIGHT * 0.75, None).into_any_element();
         };
+
+        let width = open.width_at(PAGE_HEIGHT);
+        let spread = matches!(self.layout, PageLayout::Spread) && open.page_count > 1;
 
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap(px(18.))
+            .gap(px(16.))
             .child(
                 h_flex()
-                    .gap(px(20.))
-                    .children((0..pages).map(|offset| render_page(offset + 1))),
+                    .gap(px(18.))
+                    .child(render_sheet(width, open.visible().cloned()))
+                    // The facing page is drawn as an empty sheet until spreads
+                    // rasterise two pages rather than one: an empty sheet is at
+                    // least honest about the shape of what is coming.
+                    .when(spread, |this| this.child(render_sheet(width, None))),
             )
-            .child(
-                v_flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(palette::text_muted())
-                            .child(tab.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(palette::text_faint())
-                            .child("Page rendering backend not connected yet"),
-                    ),
-            )
+            .child(self.render_page_controls(open.page, open.page_count, cx))
             .into_any_element()
+    }
+
+    /// Where the reader is, and the two ways to move.
+    fn render_page_controls(
+        &self,
+        page: u32,
+        page_count: u32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        h_flex()
+            .gap(px(4.))
+            .items_center()
+            .child(render_step(
+                "previous-page",
+                IconName::ChevronLeft,
+                page > 1,
+                cx.listener(|this, _, _, cx| this.turn_page(-1, cx)),
+            ))
+            .child(
+                div()
+                    .min_w(px(110.))
+                    .text_center()
+                    .text_size(px(12.))
+                    .text_color(palette::text_muted())
+                    .child(format!("{page} / {page_count}")),
+            )
+            .child(render_step(
+                "next-page",
+                IconName::ChevronRight,
+                page < page_count,
+                cx.listener(|this, _, _, cx| this.turn_page(1, cx)),
+            ))
     }
 }
 
-fn render_page(number: usize) -> impl IntoElement {
-    v_flex()
-        .w(px(PAGE_WIDTH))
+/// One sheet of paper, with a page on it or without.
+fn render_sheet(width: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) -> impl IntoElement {
+    div()
+        .w(px(width))
         .h(px(PAGE_HEIGHT))
-        .p(px(38.))
-        .gap(px(13.))
-        .rounded(px(4.))
+        .rounded(px(3.))
         .bg(palette::page())
         .shadow_lg()
-        .children(LINE_WIDTHS.iter().map(|width| {
-            div()
-                .h(px(9.))
-                .w(relative(*width))
-                .rounded(px(3.))
-                .bg(palette::page_placeholder())
-        }))
-        .child(div().flex_1())
+        .overflow_hidden()
+        .children(image.map(|image| img(image).w(px(width)).h(px(PAGE_HEIGHT))))
+}
+
+fn render_step(
+    id: &'static str,
+    name: IconName,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(28.))
+        .rounded(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| this.bg(palette::row_hover()))
+                .on_click(on_click)
+        })
+        .child(icon(
+            name,
+            px(15.),
+            if enabled {
+                palette::text_muted()
+            } else {
+                palette::text_faint()
+            },
+        ))
+}
+
+fn render_failure(title: SharedString, why: SharedString) -> impl IntoElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .child(icon(IconName::TriangleAlert, px(26.), palette::danger()))
         .child(
             div()
-                .w_full()
+                .text_size(px(14.))
+                .text_color(palette::text())
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(px(420.))
                 .text_center()
-                .text_size(px(11.))
-                .text_color(palette::text_faint())
-                .child(format!("{number}")),
+                .text_size(px(12.))
+                .text_color(palette::text_muted())
+                .child(why),
         )
 }
 
