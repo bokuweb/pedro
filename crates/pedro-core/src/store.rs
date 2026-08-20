@@ -145,9 +145,9 @@ impl Store {
 
     /// Every book, most recently touched first.
     pub fn books(&self) -> Result<Vec<Book>, StoreError> {
-        let mut statement = self
-            .connection
-            .prepare(&format!("{BOOK_COLUMNS} ORDER BY updated_at DESC, rowid DESC"))?;
+        let mut statement = self.connection.prepare(&format!(
+            "{BOOK_COLUMNS} ORDER BY updated_at DESC, rowid DESC"
+        ))?;
         let books = statement
             .query_map([], read_book)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -190,7 +190,11 @@ impl Store {
         // The row is what the library is; a file left behind is waste, not
         // corruption, so failing to remove it does not fail the deletion.
         if let Err(err) = std::fs::remove_file(self.document_path(&book)) {
-            tracing::warn!(?err, book = book.file_name, "could not remove the stored file");
+            tracing::warn!(
+                ?err,
+                book = book.file_name,
+                "could not remove the stored file"
+            );
         }
 
         Ok(())
@@ -198,7 +202,11 @@ impl Store {
 
     /// Saves where the reader is. Panel states left as `None` keep whatever
     /// was stored, so saving a page does not fold away an opened panel.
-    pub fn save_reading_state(&self, book_id: &str, state: &ReadingState) -> Result<(), StoreError> {
+    pub fn save_reading_state(
+        &self,
+        book_id: &str,
+        state: &ReadingState,
+    ) -> Result<(), StoreError> {
         let changed = self.connection.execute(
             "UPDATE books SET last_read_page = ?1, last_read_highlight_id = ?2, \
              last_read_outline_open = COALESCE(?3, last_read_outline_open), \

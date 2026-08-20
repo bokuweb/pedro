@@ -1,6 +1,5 @@
 //! The icon column on the far left: the brand mark and the panel switcher.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px,

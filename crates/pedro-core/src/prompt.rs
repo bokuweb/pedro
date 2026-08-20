@@ -203,7 +203,9 @@ mod tests {
 
     #[test]
     fn web_search_is_offered_only_when_it_is_on() {
-        assert!(build_system_prompt(&excerpt(true), "一節", true).contains("you may use web search"));
+        assert!(
+            build_system_prompt(&excerpt(true), "一節", true).contains("you may use web search")
+        );
         assert!(
             build_system_prompt(&excerpt(true), "一節", false)
                 .contains("Respond using only the excerpt context")

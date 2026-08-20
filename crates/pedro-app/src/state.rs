@@ -287,6 +287,16 @@ impl Panel {
                         .meta("TCP/IP Illustrated")
                         .status(Status::Working)
                         .detail("p. 289"),
+                    Entry::new("chat:3", "What is a silly window?")
+                        .icon(IconName::Bot)
+                        .meta("TCP/IP Illustrated")
+                        .status(Status::Done)
+                        .detail("p. 271"),
+                    Entry::new("chat:4", "Why is this checksum optional?")
+                        .icon(IconName::Bot)
+                        .meta("Crafting Interpreters")
+                        .status(Status::Failed)
+                        .detail("p. 88"),
                 ],
             )],
             "Select a passage while reading to ask about it.",

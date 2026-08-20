@@ -51,7 +51,9 @@ static IN_USE: Mutex<()> = Mutex::new(());
 /// matters is pdfium's own — so a poisoned lock is taken rather than turning
 /// one failed page into a permanently unusable reader.
 pub(crate) fn in_use() -> MutexGuard<'static, ()> {
-    IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    IN_USE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn library() -> Result<&'static Pdfium, PdfError> {
@@ -80,7 +82,10 @@ fn bind() -> Binding {
         match Pdfium::bind_to_library(path) {
             Ok(bindings) => {
                 tracing::info!(?path, "bound to pdfium");
-                return Ok((Box::leak(Box::new(Pdfium::new(bindings))), Some(path.clone())));
+                return Ok((
+                    Box::leak(Box::new(Pdfium::new(bindings))),
+                    Some(path.clone()),
+                ));
             }
             Err(err) => attempts.push(format!("{}: {err}", path.display())),
         }

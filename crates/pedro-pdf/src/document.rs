@@ -4,10 +4,10 @@ use std::path::Path;
 
 use pdfium_render::prelude::{PdfBitmapFormat, PdfDocument, PdfPage, PdfPageRenderRotation};
 
+use crate::PdfError;
 use crate::library::{in_use, library};
 use crate::outline::OutlineItem;
 use crate::text::{CharBox, PageText, Rect};
-use crate::PdfError;
 
 /// The character pages are joined with in the stored full text.
 ///
@@ -152,7 +152,11 @@ impl Document {
         for (position, character) in text.chars().iter().enumerate() {
             // A character pdfium cannot decode still occupies a position, and
             // dropping it here would shift every box after it.
-            string.push(character.unicode_char().unwrap_or(char::REPLACEMENT_CHARACTER));
+            string.push(
+                character
+                    .unicode_char()
+                    .unwrap_or(char::REPLACEMENT_CHARACTER),
+            );
 
             // Loose bounds rather than tight ones: a highlight should cover the
             // line's height, not just the ink of the glyph, and a character

@@ -81,7 +81,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"hello worl
 "#,
     );
 
-    assert_eq!(ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap(), "hello world");
+    assert_eq!(
+        ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap(),
+        "hello world"
+    );
 }
 
 /// An older CLI without partial messages still answers.
@@ -95,7 +98,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"hello worl
 "#,
     );
 
-    assert_eq!(ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap(), "hello world");
+    assert_eq!(
+        ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap(),
+        "hello world"
+    );
 }
 
 #[test]
@@ -152,7 +158,10 @@ exit 127
 
 #[test]
 fn a_run_that_says_nothing_is_not_an_empty_answer() {
-    let cli = fake_cli("claude-silent", "echo '{\"type\":\"system\",\"subtype\":\"init\"}'");
+    let cli = fake_cli(
+        "claude-silent",
+        "echo '{\"type\":\"system\",\"subtype\":\"init\"}'",
+    );
 
     let error = ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap_err();
     assert!(matches!(error, AgentError::NoAnswer), "{error}");
@@ -160,7 +169,10 @@ fn a_run_that_says_nothing_is_not_an_empty_answer() {
 
 #[test]
 fn a_missing_cli_is_reported_as_one() {
-    let missing = agent(AgentKind::ClaudeCode, PathBuf::from("/nonexistent/pedro/claude"));
+    let missing = agent(
+        AgentKind::ClaudeCode,
+        PathBuf::from("/nonexistent/pedro/claude"),
+    );
 
     let error = ask(&missing).0.unwrap_err();
     assert!(matches!(error, AgentError::Spawn { .. }), "{error}");

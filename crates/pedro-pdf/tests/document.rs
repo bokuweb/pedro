@@ -26,13 +26,11 @@ fn open(pages: &[&str]) -> Document {
 
 #[test]
 fn every_page_is_counted() {
-
     assert_eq!(open(&["one", "two", "three"]).page_count(), 3);
 }
 
 #[test]
 fn a_page_reports_its_size_in_points() {
-
     let size = open(&["one"]).page_size(0).expect("page 0 exists");
     assert_eq!(size.width, 300.0);
     assert_eq!(size.height, 200.0);
@@ -40,7 +38,6 @@ fn a_page_reports_its_size_in_points() {
 
 #[test]
 fn a_page_past_the_end_is_an_error() {
-
     let error = open(&["one"]).page_size(7).unwrap_err();
     assert!(
         matches!(
@@ -56,14 +53,12 @@ fn a_page_past_the_end_is_an_error() {
 
 #[test]
 fn the_text_written_onto_a_page_comes_back_off_it() {
-
     let text = open(&["Hello pedro"]).page_text(0).expect("page 0 exists");
     assert_eq!(text.text.trim(), "Hello pedro");
 }
 
 #[test]
 fn every_visible_character_has_a_box_inside_the_page() {
-
     let text = open(&["Hello"]).page_text(0).expect("page 0 exists");
 
     assert_eq!(text.chars.len(), "Hello".len());
@@ -79,7 +74,6 @@ fn every_visible_character_has_a_box_inside_the_page() {
 /// string, so the text under a drag is the text the reader saw.
 #[test]
 fn a_boxs_index_addresses_the_page_text() {
-
     let text = open(&["Hello"]).page_text(0).expect("page 0 exists");
     let third = text.chars[2];
 
@@ -88,10 +82,13 @@ fn a_boxs_index_addresses_the_page_text() {
 
 #[test]
 fn the_characters_of_a_word_run_left_to_right() {
-
     let text = open(&["Hello"]).page_text(0).expect("page 0 exists");
 
-    let lefts: Vec<f32> = text.chars.iter().map(|character| character.rect.left).collect();
+    let lefts: Vec<f32> = text
+        .chars
+        .iter()
+        .map(|character| character.rect.left)
+        .collect();
     assert!(
         lefts.windows(2).all(|pair| pair[0] < pair[1]),
         "characters out of order: {lefts:?}"
@@ -100,8 +97,9 @@ fn the_characters_of_a_word_run_left_to_right() {
 
 #[test]
 fn the_full_text_joins_pages_with_a_form_feed() {
-
-    let full_text = open(&["first", "second"]).full_text().expect("readable pages");
+    let full_text = open(&["first", "second"])
+        .full_text()
+        .expect("readable pages");
 
     let pages: Vec<&str> = full_text.split('\u{000C}').collect();
     assert_eq!(pages.len(), 2);
@@ -111,7 +109,6 @@ fn the_full_text_joins_pages_with_a_form_feed() {
 
 #[test]
 fn a_page_renders_at_the_requested_scale() {
-
     let image = open(&["one"]).render_page(0, 2.0).expect("page 0 exists");
 
     assert_eq!((image.width, image.height), (600, 400));
@@ -121,20 +118,17 @@ fn a_page_renders_at_the_requested_scale() {
 
 #[test]
 fn a_scale_that_rounds_to_nothing_still_renders_a_pixel() {
-
     let image = open(&["one"]).render_page(0, 0.0).expect("page 0 exists");
     assert_eq!((image.width, image.height), (1, 1));
 }
 
 #[test]
 fn a_document_without_bookmarks_has_no_outline() {
-
     assert!(open(&["one"]).outline().is_empty());
 }
 
 #[test]
 fn a_document_opens_from_a_file() {
-
     let path = std::env::temp_dir().join("pedro-pdf-open-test.pdf");
     std::fs::write(&path, pdf_with_pages(&["from disk"])).expect("a writable temp directory");
 

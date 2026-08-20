@@ -206,7 +206,8 @@ mod tests {
 
         #[test]
         fn a_result_states_the_final_answer() {
-            let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hello world"}"#;
+            let line =
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"hello world"}"#;
             assert_eq!(
                 parse_claude_line(line),
                 Some(AgentEvent::Finished {
@@ -316,7 +317,10 @@ mod tests {
 
         #[test]
         fn a_line_that_is_not_json_is_skipped() {
-            assert_eq!(parse_codex_line("Reading additional input from stdin..."), None);
+            assert_eq!(
+                parse_codex_line("Reading additional input from stdin..."),
+                None
+            );
         }
     }
 }

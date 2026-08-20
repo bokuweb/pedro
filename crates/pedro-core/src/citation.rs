@@ -78,8 +78,9 @@ pub struct BookText<'a> {
 /// A quoted block, each opening mark closed by its own kind so a passage that
 /// carries an apostrophe is not cut at it. None of them nest: the model writes
 /// quotes side by side, never one inside another.
-static QUOTED_BLOCK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("「[^「」]+」|\"[^\"]+\"|“[^”]+”|'[^']+'").expect("a valid pattern"));
+static QUOTED_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("「[^「」]+」|\"[^\"]+\"|“[^”]+”|'[^']+'").expect("a valid pattern")
+});
 
 /// The link in a Sources entry, looked for outside what the entry quotes.
 ///
@@ -432,14 +433,21 @@ mod tests {
 
         #[test]
         fn resolves_a_passage_split_across_two_pages_to_the_page_it_starts_on() {
-            let full_text =
-                full_text_of(&["まえがき", "Workers は グローバル", "ネットワーク で 動きます"]);
+            let full_text = full_text_of(&[
+                "まえがき",
+                "Workers は グローバル",
+                "ネットワーク で 動きます",
+            ]);
             let response =
                 "本文[1]\n\n## Sources\n[1] 「Workersはグローバルネットワークで動きます」";
 
             assert_eq!(
                 parse_citations(response, book(&full_text, 3)),
-                vec![pdf("1", "Workersはグローバルネットワークで動きます", found(2))]
+                vec![pdf(
+                    "1",
+                    "Workersはグローバルネットワークで動きます",
+                    found(2)
+                )]
             );
         }
 
@@ -525,7 +533,11 @@ mod tests {
 
             assert_eq!(
                 parse_citations(response, book(&full_text, 2)),
-                vec![pdf("1", "The runtime doesn't ship a native canvas", found(2))]
+                vec![pdf(
+                    "1",
+                    "The runtime doesn't ship a native canvas",
+                    found(2)
+                )]
             );
         }
 
@@ -645,7 +657,12 @@ mod tests {
 
         #[test]
         fn estimates_the_page_by_position_when_the_text_has_no_page_delimiters() {
-            let full_text = format!("{}\n{}目的の文{}", "a".repeat(100), "b".repeat(100), "c".repeat(100));
+            let full_text = format!(
+                "{}\n{}目的の文{}",
+                "a".repeat(100),
+                "b".repeat(100),
+                "c".repeat(100)
+            );
             let response = "本文[1]\n\n## Sources\n[1] 「目的の文」";
 
             assert_eq!(

@@ -132,7 +132,12 @@ fn an_answer_is_streamed_and_stored_with_its_sources() {
     );
 
     let answer = "It runs at the edge[1].\n\n## Sources\n[1] \"the runtime runs at the edge\"";
-    let streamed = asked(&store, &highlight, answering("chat-sources", answer), "これは?");
+    let streamed = asked(
+        &store,
+        &highlight,
+        answering("chat-sources", answer),
+        "これは?",
+    );
 
     assert!(!streamed.is_empty(), "nothing was streamed");
     assert_eq!(streamed.concat().trim(), answer);
@@ -163,7 +168,12 @@ fn a_quote_the_book_does_not_hold_is_stored_as_a_miss() {
     let (store, highlight) = reading("miss", &["preface", "the runtime"], "the runtime", 2);
 
     let answer = "Something else[1].\n\n## Sources\n[1] \"a sentence this book never printed\"";
-    asked(&store, &highlight, answering("chat-miss", answer), "これは?");
+    asked(
+        &store,
+        &highlight,
+        answering("chat-miss", answer),
+        "これは?",
+    );
 
     let citations = &store.messages(&highlight.id).expect("a query")[1].citations;
     assert_eq!(
@@ -179,7 +189,12 @@ fn a_second_question_carries_the_conversation_without_repeating_the_sources() {
     let (store, highlight) = reading("history", &["preface", "the runtime"], "the runtime", 2);
 
     let first = "It runs at the edge[1].\n\n## Sources\n[1] \"the runtime\"";
-    asked(&store, &highlight, answering("chat-first", first), "これは?");
+    asked(
+        &store,
+        &highlight,
+        answering("chat-first", first),
+        "これは?",
+    );
 
     let recorder = recording("chat-history");
     asked(&store, &highlight, recorder.clone(), "では冷スタートは?");
@@ -189,8 +204,14 @@ fn a_second_question_carries_the_conversation_without_repeating_the_sources() {
     let sent = written(&recorder, "conversation.txt");
 
     assert!(sent.contains("これは?"), "the first question was dropped");
-    assert!(sent.contains("では冷スタートは?"), "the new question was dropped");
-    assert!(sent.contains("It runs at the edge[1]."), "the answer was dropped");
+    assert!(
+        sent.contains("では冷スタートは?"),
+        "the new question was dropped"
+    );
+    assert!(
+        sent.contains("It runs at the edge[1]."),
+        "the answer was dropped"
+    );
     assert!(
         !sent.contains("## Sources"),
         "an answer's sources were sent back as history: {sent}"
@@ -211,7 +232,10 @@ fn only_the_pages_around_the_highlight_are_sent() {
 
     assert!(sent.contains("page20"), "the highlighted page was not sent");
     assert!(sent.contains("page10"), "the window was cut short");
-    assert!(!sent.contains("page1 "), "a page outside the window was sent");
+    assert!(
+        !sent.contains("page1 "),
+        "a page outside the window was sent"
+    );
     assert!(!sent.contains("page40"), "the whole book was sent");
     assert!(
         sent.contains("pages 10-30 of the 40-page document"),

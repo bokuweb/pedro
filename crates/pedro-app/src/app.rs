@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, actions, div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Window, actions, div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};

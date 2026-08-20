@@ -217,7 +217,11 @@ fn command_for(agent: &DiscoveredAgent, prompt: &Prompt) -> Command {
             command.args(["--tools", if prompt.web_search { "WebSearch" } else { "" }]);
             // An MCP server configured for coding would otherwise be started
             // for every question, and its tools offered to answer it.
-            command.args(["--strict-mcp-config", "--mcp-config", r#"{"mcpServers":{}}"#]);
+            command.args([
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#,
+            ]);
             command.arg("--");
             command.arg(render_conversation(&prompt.turns));
         }

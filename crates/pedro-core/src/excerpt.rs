@@ -109,7 +109,11 @@ mod tests {
     }
 
     fn outline() -> Vec<OutlineItem> {
-        vec![chapter("第1章", 2), chapter("第2章", 5), chapter("第3章", 9)]
+        vec![
+            chapter("第1章", 2),
+            chapter("第2章", 5),
+            chapter("第3章", 9),
+        ]
     }
 
     /// A book of `page_count` pages whose page *n* reads `pn`.
@@ -202,7 +206,11 @@ mod tests {
 
     #[test]
     fn orders_an_unsorted_outline_before_cutting_chapter_bounds() {
-        let shuffled = vec![chapter("第3章", 9), chapter("第1章", 2), chapter("第2章", 5)];
+        let shuffled = vec![
+            chapter("第3章", 9),
+            chapter("第1章", 2),
+            chapter("第2章", 5),
+        ];
 
         assert_eq!(
             select_excerpt(&book_of(12), 6, &shuffled),

@@ -7,8 +7,8 @@ mod state;
 mod ui;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, point, px, size,
+    AnyView, App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
@@ -48,8 +48,11 @@ fn main() {
             };
 
             cx.open_window(options, |window, cx| {
-                let pedro = cx.new(|cx| Pedro::new(window, cx));
-                cx.new(|cx| Root::new(pedro.into(), window, cx))
+                // Named rather than inferred: `Root::new` takes anything that
+                // converts into an `AnyView`, which leaves `.into()` with
+                // nothing to pick from.
+                let pedro: AnyView = cx.new(|cx| Pedro::new(window, cx)).into();
+                cx.new(|cx| Root::new(pedro, window, cx))
             })
             .expect("failed to open window");
 
