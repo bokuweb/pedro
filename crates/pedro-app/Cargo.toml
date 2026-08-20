@@ -1,0 +1,21 @@
+[package]
+name = "pedro-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pedro desktop application."
+
+[[bin]]
+name = "pedro"
+path = "src/main.rs"
+
+[dependencies]
+pedro-agent.workspace = true
+
+anyhow.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
