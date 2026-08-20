@@ -10,6 +10,8 @@ use pedro_core::model::ChatMessage;
 
 /// The conversation the chat panel is showing.
 pub struct Conversation {
+    /// The stored passage this conversation hangs off, once there is one.
+    pub highlight_id: Option<String>,
     /// The passage the question is about, as the reader marked it.
     pub passage: SharedString,
     /// Where that passage is, so a stored highlight can be found again.
@@ -29,6 +31,7 @@ pub struct Conversation {
 impl Conversation {
     pub fn about(passage: impl Into<SharedString>, page: u32) -> Self {
         Self {
+            highlight_id: None,
             passage: passage.into(),
             page,
             messages: Vec::new(),

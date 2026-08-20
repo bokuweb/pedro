@@ -33,13 +33,26 @@ impl Pedro {
         }
 
         let Some(open) = &tab.document else {
-            return render_sheet(PAGE_HEIGHT * 0.75, None, Vec::new()).into_any_element();
+            return render_sheet(PAGE_HEIGHT * 0.75, None, Vec::new(), Vec::new())
+                .into_any_element();
         };
 
         let width = open.width_at(PAGE_HEIGHT);
         let spread = matches!(self.layout, PageLayout::Spread) && open.page_count > 1;
-        let page =
-            render_sheet(width, open.visible().cloned(), open.selection_rects()).into_any_element();
+        // Marked passages sit under the live selection: the reader is dragging
+        // out one of them right now, and what is under the pointer has to be
+        // the brighter of the two.
+        let marks: Vec<Rect> = open
+            .highlights_here()
+            .flat_map(|highlight| highlight.rects.iter().copied())
+            .collect();
+        let page = render_sheet(
+            width,
+            open.visible().cloned(),
+            marks,
+            open.selection_rects(),
+        )
+        .into_any_element();
 
         v_flex()
             .size_full()
@@ -54,7 +67,7 @@ impl Pedro {
                     // rasterise two pages rather than one: an empty sheet is at
                     // least honest about the shape of what is coming.
                     .when(spread, |this| {
-                        this.child(render_sheet(width, None, Vec::new()))
+                        this.child(render_sheet(width, None, Vec::new(), Vec::new()))
                     }),
             )
             .child(self.render_page_controls(open.page, open.page_count, cx))
@@ -133,6 +146,7 @@ impl Pedro {
 fn render_sheet(
     width: f32,
     image: Option<Arc<RenderImage>>,
+    marks: Vec<Rect>,
     selection: Vec<Rect>,
 ) -> impl IntoElement {
     div()
@@ -144,15 +158,24 @@ fn render_sheet(
         .shadow_lg()
         .overflow_hidden()
         .children(image.map(|image| img(image).w(px(width)).h(px(PAGE_HEIGHT))))
-        .children(selection.into_iter().map(render_marked))
+        .children(
+            marks
+                .into_iter()
+                .map(|rect| render_over_page(rect, palette::working().opacity(0.26))),
+        )
+        .children(
+            selection
+                .into_iter()
+                .map(|rect| render_over_page(rect, palette::accent().opacity(0.34))),
+        )
 }
 
-/// One line of the selection, drawn over the page.
+/// One line of a mark, drawn over the page.
 ///
 /// Placed in fractions of the sheet rather than in pixels, which is the same
-/// space the character boxes are measured in — so the mark stays on the words
-/// at any size the page is drawn.
-fn render_marked(rect: Rect) -> impl IntoElement {
+/// space the character boxes are measured in — so a mark stays on its words at
+/// any size the page is drawn.
+fn render_over_page(rect: Rect, tint: gpui::Hsla) -> impl IntoElement {
     div()
         .absolute()
         .left(relative(rect.left))
@@ -160,7 +183,7 @@ fn render_marked(rect: Rect) -> impl IntoElement {
         .w(relative(rect.width().max(0.0)))
         .h(relative(rect.height().max(0.0)))
         .rounded(px(2.))
-        .bg(palette::accent().opacity(0.34))
+        .bg(tint)
 }
 
 fn render_step(

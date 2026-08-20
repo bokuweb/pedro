@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use gpui::{RenderImage, SharedString};
 use image::{Frame, RgbaImage};
+use pedro_core::model::Highlight;
 use pedro_pdf::{Document, PageImage, PageSize, PageText, PixelFormat, Rect};
 
 /// How much detail to render per logical pixel.
@@ -34,6 +35,9 @@ pub struct OpenDocument {
     /// What turns a drag across the page into a passage.
     pub text: Option<PageText>,
     pub selection: Option<Selection>,
+    /// Every passage marked in this book, so the ones on the page can be drawn
+    /// and the conversation behind one can be reopened by clicking it.
+    pub highlights: Vec<Highlight>,
 }
 
 /// A run of characters the reader has dragged across.
@@ -65,6 +69,7 @@ impl OpenDocument {
             rendered: None,
             text: None,
             selection: None,
+            highlights: Vec::new(),
         }
     }
 
@@ -155,6 +160,25 @@ impl OpenDocument {
         let text = self.page_text()?.slice(selection.from, selection.to);
 
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// The passages marked on the page being shown.
+    pub fn highlights_here(&self) -> impl DoubleEndedIterator<Item = &Highlight> {
+        let page = self.page;
+
+        self.highlights
+            .iter()
+            .filter(move |highlight| highlight.page_number == page)
+    }
+
+    /// The marked passage under `(x, y)`, in page fractions.
+    ///
+    /// The most recent wins where two overlap: a reader who marks the same
+    /// sentence twice means the question they asked about it last.
+    pub fn highlight_at(&self, x: f32, y: f32) -> Option<&Highlight> {
+        self.highlights_here()
+            .filter(|highlight| highlight.rects.iter().any(|rect| rect.contains(x, y)))
+            .next_back()
     }
 
     /// One rectangle per line of the selection, to draw over the page.

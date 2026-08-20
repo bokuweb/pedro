@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
-use pedro_core::model::{Book, ChatMessage, NewHighlight};
+use pedro_core::model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};
 use pedro_core::store::Store;
 use pedro_core::{Question, ask};
 use pedro_pdf::{Document, PageSize};
@@ -344,12 +344,20 @@ impl Pedro {
                     // Locked here rather than on the UI thread: an answer being
                     // written holds this same lock for as long as the agent
                     // takes, and the window must not wait on that.
-                    let path = store.lock().document_path(&book);
+                    let (path, highlights) = {
+                        let store = store.lock();
+                        let path = store.document_path(&book);
+                        let highlights =
+                            store.highlights(&book.id).map_err(|err| err.to_string())?;
+
+                        (path, highlights)
+                    };
+
                     let document = Document::open(&path).map_err(|err| err.to_string())?;
                     // Every page is laid out against the first one's size, so
                     // it is read here rather than on the UI thread later.
                     let size = document.page_size(0).map_err(|err| err.to_string())?;
-                    Ok::<_, String>((document, size))
+                    Ok::<_, String>((document, size, highlights))
                 })
                 .await;
 
@@ -362,7 +370,7 @@ impl Pedro {
     fn book_loaded(
         &mut self,
         tab_id: &str,
-        opened: Result<(Document, PageSize), String>,
+        opened: Result<(Document, PageSize, Vec<Highlight>), String>,
         page: u32,
         cx: &mut Context<Self>,
     ) {
@@ -372,9 +380,11 @@ impl Pedro {
         };
 
         match opened {
-            Ok((document, size)) => {
+            Ok((document, size, highlights)) => {
                 tab.error = None;
-                tab.document = Some(OpenDocument::new(document, size, page));
+                let mut open = OpenDocument::new(document, size, page);
+                open.highlights = highlights;
+                tab.document = Some(open);
             }
             Err(why) => {
                 tracing::error!(why, tab_id, "could not open the book");
@@ -494,6 +504,18 @@ impl Pedro {
         let Some((x, y)) = self.on_the_page(position) else {
             return;
         };
+
+        // A passage already marked is a conversation, not a place to start a
+        // new selection: pressing on one reopens what was said about it.
+        if let Some(highlight) = self
+            .open_document()
+            .and_then(|open| open.highlight_at(x, y))
+            .cloned()
+        {
+            self.open_highlight(&highlight, cx);
+            return;
+        }
+
         let Some(open) = self.document_mut() else {
             return;
         };
@@ -542,8 +564,82 @@ impl Pedro {
 
         if open.turn(by) {
             self.render_visible_page(cx);
+            self.save_reading_position(cx);
             cx.notify();
         }
+    }
+
+    /// Writes down where the reader is, so the book opens here next time.
+    ///
+    /// Fire and forget: a place that fails to save is worth a log line and
+    /// nothing more, since the reader is still looking at the page.
+    fn save_reading_position(&self, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let Some(book_id) = tab.id.strip_prefix("book:").map(str::to_owned) else {
+            return;
+        };
+        let Some(page) = tab.document.as_ref().map(|open| open.page) else {
+            return;
+        };
+
+        cx.background_executor()
+            .spawn(async move {
+                let state = ReadingState {
+                    page,
+                    highlight_id: None,
+                    // Nothing here has said either way about the panels, and
+                    // saying nothing is what leaves them as the reader left
+                    // them (see `Store::save_reading_state`).
+                    outline_open: None,
+                    chat_panel_open: None,
+                };
+
+                if let Err(err) = store.lock().save_reading_state(&book_id, &state) {
+                    tracing::warn!(?err, book_id, page, "could not save the place");
+                }
+            })
+            .detach();
+    }
+
+    /// Reopens the conversation behind a marked passage.
+    fn open_highlight(&mut self, highlight: &Highlight, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        let mut conversation =
+            Conversation::about(highlight.selected_text.clone(), highlight.page_number);
+        conversation.highlight_id = Some(highlight.id.clone());
+        self.chat = Some(conversation);
+
+        let highlight_id = highlight.id.clone();
+        cx.spawn(async move |this, cx| {
+            let messages = cx
+                .background_executor()
+                .spawn(async move {
+                    store
+                        .lock()
+                        .messages(&highlight_id)
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if let (Some(chat), Ok(messages)) = (&mut this.chat, messages) {
+                    chat.answered(messages);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        cx.notify();
     }
 
     fn next_page(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
@@ -728,7 +824,12 @@ impl Pedro {
     fn answered(&mut self, finished: Result<Vec<ChatMessage>, String>, cx: &mut Context<Self>) {
         if let Some(chat) = &mut self.chat {
             match finished {
-                Ok(messages) => chat.answered(messages),
+                Ok(messages) => {
+                    chat.answered(messages);
+                    // The passage was stored as a highlight to hang the
+                    // conversation off; the page has not been told yet.
+                    self.reload_highlights(cx);
+                }
                 Err(why) => {
                     tracing::error!(why, "the agent did not answer");
                     chat.failed(why);
@@ -737,6 +838,51 @@ impl Pedro {
         }
 
         cx.notify();
+    }
+
+    /// Reads the book's marked passages back out of the store.
+    fn reload_highlights(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let Some(book_id) = tab.id.strip_prefix("book:").map(str::to_owned) else {
+            return;
+        };
+        let tab_id = tab.id.clone();
+
+        cx.spawn(async move |this, cx| {
+            let highlights = cx
+                .background_executor()
+                .spawn(async move {
+                    store
+                        .lock()
+                        .highlights(&book_id)
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                let Ok(highlights) = highlights else {
+                    return;
+                };
+                if let Some(open) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.document.as_mut())
+                {
+                    open.highlights = highlights;
+                    // The passage is a mark now, not a pending selection.
+                    open.selection = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Stops an answer that is still being written.
