@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, Styled as _, Window, actions, div, px,
@@ -209,17 +210,21 @@ impl Focusable for Pedro {
 }
 
 impl Render for Pedro {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("pedro")
             .key_context("Pedro")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::focus_search))
             .size_full()
-            .bg(palette::canvas())
             .text_color(cx.theme().foreground)
             .text_size(px(15.))
-            .child(self.render_title_strip(cx))
+            // Fullscreen has no traffic lights to clear and nowhere to drag the
+            // window to, so the strip would be a band of nothing across the top
+            // of the screen. The tab bar becomes the first row instead.
+            .when(!window.is_fullscreen(), |this| {
+                this.child(self.render_title_strip(cx))
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -230,6 +235,10 @@ impl Render for Pedro {
                         v_flex()
                             .flex_1()
                             .min_w_0()
+                            // The only place the canvas is painted: the reader
+                            // and the composer sit on it rather than each
+                            // laying down another film of their own.
+                            .bg(palette::canvas())
                             .child(self.render_tab_bar(cx))
                             .child(div().flex_1().min_h_0().child(self.render_reader(cx)))
                             .child(self.render_composer(cx)),

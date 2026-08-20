@@ -4,6 +4,10 @@
 //! to edge, which means this strip is responsible for the two things the
 //! system titlebar would otherwise do: leave room for the traffic lights and
 //! let the window be dragged.
+//!
+//! Both of those stop existing in fullscreen, so the root does not render this
+//! at all there (see [`crate::app`]) rather than leaving an empty band across
+//! the top of the screen.
 
 use gpui::{Context, InteractiveElement as _, IntoElement, MouseButton, Styled as _, Window, px};
 use gpui_component::{InteractiveElementExt as _, h_flex};

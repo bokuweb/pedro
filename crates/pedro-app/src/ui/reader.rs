@@ -37,7 +37,6 @@ impl Pedro {
             .items_center()
             .justify_center()
             .gap(px(18.))
-            .bg(palette::canvas())
             .child(
                 h_flex()
                     .gap(px(20.))
@@ -97,7 +96,6 @@ fn render_empty_state() -> impl IntoElement {
         .items_center()
         .justify_center()
         .gap(px(10.))
-        .bg(palette::canvas())
         .child(icon(IconName::BookOpen, px(28.), palette::text_faint()))
         .child(
             div()

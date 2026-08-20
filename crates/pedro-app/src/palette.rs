@@ -5,6 +5,12 @@
 //! carry alpha rather than being flat: a fully opaque panel over a blurred
 //! window looks like a mistake, not a choice.
 //!
+//! Alpha only survives if it is not stacked. Three translucent layers over each
+//! other are an opaque layer: 0.66 over 0.72 over 0.72 is 0.97, which is what
+//! the rail and the sidebar used to be. So exactly one surface paints each
+//! pixel — the theme background is clear, the root paints nothing, and the rail,
+//! the sidebar and the content column each paint themselves once.
+//!
 //! Everything lives here so the whole surface can be re-tuned without hunting
 //! through the view code. [`apply_to_theme`] pushes it into `gpui-component` so
 //! its widgets (inputs, buttons, scrollbars) match the hand-rolled parts.
@@ -17,24 +23,26 @@ fn veiled(hex: u32, alpha: f32) -> Hsla {
     Hsla::from(rgb(hex)).opacity(alpha)
 }
 
-/// Behind everything, and the reader canvas.
+/// The column the pages sit in. Denser than the panels: this is what body text
+/// and a page's own shadow are read against.
 pub fn canvas() -> Hsla {
-    veiled(0x1d1229, 0.72)
+    veiled(0x1d1229, 0.58)
 }
 
-/// The title strip, top bar and tab bar.
+/// The title strip and the tab bar.
 pub fn chrome() -> Hsla {
-    veiled(0x180f22, 0.66)
+    veiled(0x17101f, 0.34)
 }
 
-/// The narrow icon column on the far left.
+/// The narrow icon column on the far left. The most transparent surface in the
+/// window, so the eye reads it as the edge of the glass rather than as a panel.
 pub fn rail() -> Hsla {
-    veiled(0x140c1d, 0.7)
+    veiled(0x160e1f, 0.4)
 }
 
 /// The panel between the rail and the reader.
 pub fn sidebar() -> Hsla {
-    veiled(0x1a1024, 0.66)
+    veiled(0x221530, 0.36)
 }
 
 /// A row in the sidebar list.
@@ -133,7 +141,10 @@ pub fn apply_to_theme(cx: &mut App) {
     theme.radius = px(10.);
     theme.radius_lg = px(16.);
 
-    theme.background = canvas();
+    // Root paints this over the whole window before anything of ours draws, so
+    // anything but clear would put a film under every panel and take the blur
+    // with it.
+    theme.background = gpui::transparent_black();
     theme.foreground = text();
     theme.muted = surface();
     theme.muted_foreground = text_muted();
