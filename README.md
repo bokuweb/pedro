@@ -24,8 +24,10 @@ The plan, and the decisions behind it, are in [`docs/PORT_PLAN.md`](docs/PORT_PL
 
 ## Status
 
-The reader's whole non-visual half is implemented and tested. The screens are
-next.
+Everything except the screens is implemented and tested, and the first two
+screens — the library and the reader — are real. What is missing is the part
+that makes it chatbook rather than a PDF viewer: selecting a passage and asking
+about it.
 
 | Area | State |
 | --- | --- |
@@ -35,8 +37,10 @@ next.
 | Library: SQLite, content-addressed files, highlights, conversations, reading position | Done (`pedro-core`) |
 | Choosing a question's context, building the prompt, resolving citations to pages | Done (`pedro-core`) |
 | Asking about a highlight, end to end | Done (`pedro-core`, see `--example ask`) |
-| Application shell (rail, sidebar, tabs, reader canvas) | Done, still showing placeholder data |
-| The screens: library, real pages, selection, chat panel, outline, settings | Not started |
+| Application shell (rail, sidebar, tabs, reader canvas) | Done |
+| Library screen: adding a PDF, listing what is stored | Done |
+| Reader: real pages, page turning | Done |
+| Selecting a passage, highlights, the chat panel, the outline, settings | Not started |
 
 ## Layout
 
