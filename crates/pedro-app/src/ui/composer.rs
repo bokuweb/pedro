@@ -240,19 +240,19 @@ impl Pedro {
                             .child(document),
                     ),
             )
-            .child(
+            .children(self.open_document().map(|open| {
                 h_flex()
                     .flex_shrink_0()
                     .gap(px(6.))
                     .items_center()
-                    .child(icon(self.layout.icon(), px(12.), palette::text_faint()))
+                    .child(icon(IconName::File, px(12.), palette::text_faint()))
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(palette::text_faint())
-                            .child(self.layout.label()),
-                    ),
-            )
+                            .child(format!("{} pages", open.page_count)),
+                    )
+            }))
     }
 }
 

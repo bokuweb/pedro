@@ -3,14 +3,17 @@
 //! The individual regions live in [`crate::ui`], as `impl Pedro` blocks, so
 //! that this file stays about state transitions rather than styling.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, SharedString,
-    Styled as _, Window, actions, div, px,
+    IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Styled as _, UniformListScrollHandle, Window, actions, div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
@@ -21,10 +24,10 @@ use pedro_core::{Question, ask};
 use pedro_pdf::{Document, PageSize};
 
 use crate::chat::Conversation;
-use crate::document::{OpenDocument, as_render_image};
+use crate::document::{OpenDocument, Page, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
-use crate::state::{AgentStatus, Entry, OpenTab, PageLayout, Panel, RailItem, Shown};
+use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
 
 actions!(pedro, [FocusSearch, NextPage, PreviousPage]);
 
@@ -49,7 +52,6 @@ pub struct Pedro {
     pub(crate) collapsed: HashSet<(RailItem, usize)>,
     pub(crate) tabs: Vec<OpenTab>,
     pub(crate) active_tab: Option<usize>,
-    pub(crate) layout: PageLayout,
     pub(crate) agent_status: AgentStatus,
     pub(crate) library: Library,
     /// The conversation the chat panel is showing, if one is open.
@@ -57,9 +59,14 @@ pub struct Pedro {
     /// Whether the sidebar is showing the places that are settings rather than
     /// reading.
     pub(crate) show_secondary: bool,
-    /// Where the page is on screen, recorded while it is drawn. A drag arrives
-    /// in window coordinates and the page needs it as a fraction of itself.
-    pub(crate) page_bounds: Option<Bounds<Pixels>>,
+    /// Where each page was drawn, recorded while the frame is laid out. A drag
+    /// arrives in window coordinates and a page needs it as a fraction of
+    /// itself.
+    ///
+    /// A cell rather than plain state: it is written during layout, and asking
+    /// the view to change then would ask for another frame, every frame.
+    pub(crate) page_bounds: Rc<RefCell<HashMap<u32, Bounds<Pixels>>>>,
+    pub(crate) page_scroll: UniformListScrollHandle,
     /// Whether the pointer is down on the page, dragging out a passage.
     pub(crate) selecting: bool,
     /// The last thing that went wrong where the reader was looking. Shown in
@@ -100,12 +107,12 @@ impl Pedro {
             collapsed: HashSet::new(),
             tabs: Vec::new(),
             active_tab: None,
-            layout: PageLayout::Single,
             agent_status,
             library,
             chat: None,
             show_secondary: false,
-            page_bounds: None,
+            page_bounds: Rc::new(RefCell::new(HashMap::new())),
+            page_scroll: UniformListScrollHandle::new(),
             selecting: false,
             notice: None,
             window_drag_armed: false,
@@ -416,24 +423,52 @@ impl Pedro {
             }
         }
 
-        self.render_visible_page(cx);
         cx.notify();
     }
 
-    /// Rasterises the page the reader is on, unless it is already drawn.
-    fn render_visible_page(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab.and_then(|index| self.tabs.get(index)) else {
+    /// Rasterises the pages the list is about to draw.
+    ///
+    /// Called from the list's own item builder, which is the one place that
+    /// knows what is on screen; the page at the top of the range is also the
+    /// page the reader is on, which is what a question quotes and what the
+    /// stored place points at.
+    pub(crate) fn pages_in_view(&mut self, range: &Range<usize>, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab else {
             return;
         };
-        let Some(open) = &tab.document else {
+        let Some(open) = self.tabs.get_mut(tab).and_then(|tab| tab.document.as_mut()) else {
             return;
         };
-        if open.visible().is_some() {
-            return;
+
+        let top = range.start as u32 + 1;
+        let moved = open.page != top;
+        open.page = top;
+
+        // One page beyond the range in each direction, so scrolling by a page
+        // never waits for pdfium.
+        let first = top.saturating_sub(1).max(1);
+        let last = (range.end as u32 + 1).min(open.page_count);
+
+        let wanted: Vec<u32> = (first..=last).filter(|page| open.wants(*page)).collect();
+        for page in &wanted {
+            open.requested.insert(*page);
         }
 
-        let tab_id = tab.id.clone();
-        let page = open.page;
+        let tab_id = self.tabs[tab].id.clone();
+        for page in wanted {
+            self.rasterise(tab_id.clone(), page, cx);
+        }
+
+        if moved {
+            self.save_reading_position(cx);
+        }
+    }
+
+    /// Asks pdfium for one page, and for the text on it.
+    fn rasterise(&mut self, tab_id: SharedString, page: u32, cx: &mut Context<Self>) {
+        let Some(open) = self.open_document() else {
+            return;
+        };
         let document = open.document.clone();
         let scale = open.scale_for(PAGE_HEIGHT);
 
@@ -480,11 +515,13 @@ impl Pedro {
 
         match rendered {
             Ok((image, text)) => {
-                open.text = Some(text);
-                open.rendered =
-                    as_render_image(image).map(|image| crate::document::Rendered { page, image });
+                open.requested.remove(&page);
+                if let Some(image) = as_render_image(image) {
+                    open.store(page, Page { image, text });
+                }
             }
             Err(why) => {
+                open.requested.remove(&page);
                 tracing::error!(why, page, "could not render a page");
                 tab.error = Some(why.into());
             }
@@ -493,20 +530,9 @@ impl Pedro {
         cx.notify();
     }
 
-    /// Records where the page is being drawn, so a drag can be read against it.
-    ///
-    /// Called while the page is laid out, which is the only place the answer is
-    /// known — and only stored when it changes, since storing it every frame
-    /// would ask for another frame every frame.
-    pub(crate) fn page_drawn_at(&mut self, bounds: Bounds<Pixels>) {
-        if self.page_bounds != Some(bounds) {
-            self.page_bounds = Some(bounds);
-        }
-    }
-
-    /// Where a window-space point falls on the page, as fractions of it.
-    fn on_the_page(&self, position: Point<Pixels>) -> Option<(f32, f32)> {
-        let bounds = self.page_bounds?;
+    /// Where a window-space point falls on `page`, as fractions of it.
+    fn on_the_page(&self, page: u32, position: Point<Pixels>) -> Option<(f32, f32)> {
+        let bounds = *self.page_bounds.borrow().get(&page)?;
         let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         if width <= 0.0 || height <= 0.0 {
             return None;
@@ -524,8 +550,13 @@ impl Pedro {
             .and_then(|tab| tab.document.as_mut())
     }
 
-    pub(crate) fn begin_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some((x, y)) = self.on_the_page(position) else {
+    pub(crate) fn begin_selection(
+        &mut self,
+        page: u32,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((x, y)) = self.on_the_page(page, position) else {
             return;
         };
 
@@ -533,7 +564,7 @@ impl Pedro {
         // new selection: pressing on one reopens what was said about it.
         if let Some(highlight) = self
             .open_document()
-            .and_then(|open| open.highlight_at(x, y))
+            .and_then(|open| open.highlight_at(page, x, y))
             .cloned()
         {
             self.open_highlight(&highlight, cx);
@@ -544,23 +575,28 @@ impl Pedro {
             return;
         };
 
-        open.begin_selection(x, y);
+        open.begin_selection(page, x, y);
         self.selecting = true;
         cx.notify();
     }
 
-    pub(crate) fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn extend_selection(
+        &mut self,
+        page: u32,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.selecting {
             return;
         }
-        let Some((x, y)) = self.on_the_page(position) else {
+        let Some((x, y)) = self.on_the_page(page, position) else {
             return;
         };
         let Some(open) = self.document_mut() else {
             return;
         };
 
-        open.extend_selection(x, y);
+        open.extend_selection(page, x, y);
         cx.notify();
     }
 
@@ -586,9 +622,10 @@ impl Pedro {
             return;
         };
 
-        if open.turn(by) {
-            self.render_visible_page(cx);
-            self.save_reading_position(cx);
+        if let Some(page) = open.turn(by) {
+            // The list is what holds the position, so a page turn is a scroll.
+            self.page_scroll
+                .scroll_to_item(page as usize - 1, ScrollStrategy::Top);
             cx.notify();
         }
     }
@@ -700,9 +737,6 @@ impl Pedro {
     pub(crate) fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active_tab = Some(index);
-            // Its page may never have been drawn, or may have been drawn at a
-            // page the reader has since turned away from in another tab.
-            self.render_visible_page(cx);
             cx.notify();
         }
     }
@@ -726,13 +760,6 @@ impl Pedro {
 
     pub(crate) fn active_tab(&self) -> Option<&OpenTab> {
         self.active_tab.and_then(|index| self.tabs.get(index))
-    }
-
-    pub(crate) fn set_layout(&mut self, layout: PageLayout, cx: &mut Context<Self>) {
-        if self.layout != layout {
-            self.layout = layout;
-            cx.notify();
-        }
     }
 
     pub(crate) fn toggle_secondary(&mut self, cx: &mut Context<Self>) {
@@ -843,8 +870,8 @@ impl Pedro {
             book_id,
             NewHighlight {
                 selected_text: open.selected_text()?,
-                page_number: open.page,
-                rects: open.selection_rects(),
+                page_number: open.selection()?.page,
+                rects: open.selection_rects(open.selection()?.page),
             },
         ))
     }

@@ -1,29 +1,36 @@
-//! The document canvas.
+//! The document canvas: every page of the book, in one scroll.
 //!
-//! A page is a rasterised image of a real PDF page, drawn at its own aspect
-//! ratio on white paper. Until it arrives — a book is read off disk and its
-//! first page rasterised in the background — the same sheet is drawn empty,
-//! which keeps the layout from jumping when the page lands in it.
+//! A thousand-page book cannot be rasterised, so the list only builds the rows
+//! it is about to draw and only those pages are asked of pdfium. Every page is
+//! laid out against the first one's size, which is what makes the rows a uniform
+//! height and the scrollbar honest before a single page has been read.
+//!
+//! Each page records where it was drawn, because a drag arrives in window
+//! coordinates and characters are known as fractions of a page. It is recorded
+//! into a shared cell rather than into the view because this happens while the
+//! frame is being laid out, and asking the view to change then would ask for
+//! another frame, every frame.
 
+use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, canvas, div, img, px,
-    relative,
+    AnyElement, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement as _, RenderImage, SharedString, Styled as _, canvas, div, img,
+    px, relative, uniform_list,
 };
 use gpui_component::{IconName, h_flex, v_flex};
-
 use pedro_pdf::Rect;
 
 use crate::app::{PAGE_HEIGHT, Pedro};
 use crate::palette;
-use crate::state::PageLayout;
 use crate::ui::icon;
 
+/// The space between one page and the next.
+const GAP: f32 = 20.;
+
 impl Pedro {
-    pub(crate) fn render_reader(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let Some(tab) = self.active_tab() else {
             return render_empty_state().into_any_element();
         };
@@ -33,111 +40,97 @@ impl Pedro {
         }
 
         let Some(open) = &tab.document else {
-            return render_sheet(PAGE_HEIGHT * 0.75, None, Vec::new(), Vec::new())
-                .into_any_element();
+            return render_opening().into_any_element();
+        };
+
+        let page_count = open.page_count as usize;
+
+        uniform_list(
+            "pages",
+            page_count,
+            cx.processor(|this, range: Range<usize>, _window, cx| {
+                // The list asks for exactly the rows it is about to draw, which
+                // makes this the one place that knows what to rasterise.
+                this.pages_in_view(&range, cx);
+
+                range
+                    .map(|index| this.render_page_row(index as u32 + 1, cx))
+                    .collect()
+            }),
+        )
+        .track_scroll(self.page_scroll.clone())
+        .size_full()
+        .into_any_element()
+    }
+
+    /// One page, centred in a row of its own.
+    fn render_page_row(&self, page: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let Some(open) = self.open_document() else {
+            return div().h(px(PAGE_HEIGHT + GAP)).into_any_element();
         };
 
         let width = open.width_at(PAGE_HEIGHT);
-        let spread = matches!(self.layout, PageLayout::Spread) && open.page_count > 1;
-        // Marked passages sit under the live selection: the reader is dragging
-        // out one of them right now, and what is under the pointer has to be
-        // the brighter of the two.
         let marks: Vec<Rect> = open
-            .highlights_here()
+            .highlights_on(page)
             .flat_map(|highlight| highlight.rects.iter().copied())
             .collect();
-        let page = render_sheet(
-            width,
-            open.visible().cloned(),
-            marks,
-            open.selection_rects(),
-        )
-        .into_any_element();
 
-        v_flex()
-            .size_full()
-            .items_center()
+        let sheet = render_sheet(
+            width,
+            open.page(page).map(|held| held.image.clone()),
+            marks,
+            open.selection_rects(page),
+        );
+
+        h_flex()
+            .h(px(PAGE_HEIGHT + GAP))
+            .w_full()
             .justify_center()
-            .gap(px(16.))
-            .child(
-                h_flex()
-                    .gap(px(18.))
-                    .child(self.selectable(page, cx))
-                    // The facing page is drawn as an empty sheet until spreads
-                    // rasterise two pages rather than one: an empty sheet is at
-                    // least honest about the shape of what is coming.
-                    .when(spread, |this| {
-                        this.child(render_sheet(width, None, Vec::new(), Vec::new()))
-                    }),
-            )
-            .child(self.render_page_controls(open.page, open.page_count, cx))
+            .items_start()
+            .child(self.selectable(page, sheet.into_any_element(), cx))
             .into_any_element()
     }
 
     /// Makes a page answer a drag with a passage.
-    ///
-    /// The page also reports where it was drawn, because a drag arrives in
-    /// window coordinates and the characters are known as fractions of the
-    /// page; a `canvas` is the only element that is told its own bounds.
-    fn selectable(&self, page: AnyElement, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let this = cx.entity();
+    fn selectable(
+        &self,
+        page: u32,
+        sheet: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bounds = self.page_bounds.clone();
 
         div()
-            .id("page")
+            .id(("page", page as usize))
             .relative()
             .cursor_text()
-            .child(page)
-            .child(canvas(
-                move |bounds, _, cx| {
-                    this.update(cx, |this, _| this.page_drawn_at(bounds));
-                },
-                |_, _, _, _| {},
-            ))
+            .child(sheet)
+            .child(
+                canvas(
+                    move |drawn, _, _| {
+                        bounds.borrow_mut().insert(page, drawn);
+                    },
+                    |_, _, _, _| {},
+                )
+                // Without a size of its own a canvas is laid out as nothing,
+                // and the bounds it reports are nothing too — which is what
+                // made every drag fall outside the page.
+                .absolute()
+                .size_full(),
+            )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.begin_selection(event.position, cx)
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.begin_selection(page, event.position, cx)
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                this.extend_selection(event.position, cx)
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.extend_selection(page, event.position, cx)
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_selection(cx)),
             )
-    }
-
-    /// Where the reader is, and the two ways to move.
-    fn render_page_controls(
-        &self,
-        page: u32,
-        page_count: u32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        h_flex()
-            .gap(px(4.))
-            .items_center()
-            .child(render_step(
-                "previous-page",
-                IconName::ChevronLeft,
-                page > 1,
-                cx.listener(|this, _, _, cx| this.turn_page(-1, cx)),
-            ))
-            .child(
-                div()
-                    .min_w(px(110.))
-                    .text_center()
-                    .text_size(px(12.))
-                    .text_color(palette::text_muted())
-                    .child(format!("{page} / {page_count}")),
-            )
-            .child(render_step(
-                "next-page",
-                IconName::ChevronRight,
-                page < page_count,
-                cx.listener(|this, _, _, cx| this.turn_page(1, cx)),
-            ))
     }
 }
 
@@ -175,7 +168,7 @@ fn render_sheet(
 /// Placed in fractions of the sheet rather than in pixels, which is the same
 /// space the character boxes are measured in — so a mark stays on its words at
 /// any size the page is drawn.
-fn render_over_page(rect: Rect, tint: gpui::Hsla) -> impl IntoElement {
+fn render_over_page(rect: Rect, tint: Hsla) -> impl IntoElement {
     div()
         .absolute()
         .left(relative(rect.left))
@@ -186,32 +179,21 @@ fn render_over_page(rect: Rect, tint: gpui::Hsla) -> impl IntoElement {
         .bg(tint)
 }
 
-fn render_step(
-    id: &'static str,
-    name: IconName,
-    enabled: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .size(px(28.))
-        .rounded(px(8.))
-        .flex()
-        .items_center()
+/// A book still being read off disk.
+///
+/// An empty sheet rather than a spinner: the first page lands in a space of the
+/// right shape instead of pushing the layout around when it arrives.
+fn render_opening() -> impl IntoElement {
+    h_flex()
+        .size_full()
         .justify_center()
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|this| this.bg(palette::row_hover()))
-                .on_click(on_click)
-        })
-        .child(icon(
-            name,
-            px(15.),
-            if enabled {
-                palette::text_muted()
-            } else {
-                palette::text_faint()
-            },
+        .items_start()
+        .pt(px(GAP))
+        .child(render_sheet(
+            PAGE_HEIGHT * 0.75,
+            None,
+            Vec::new(),
+            Vec::new(),
         ))
 }
 

@@ -1,10 +1,16 @@
-//! An open book, and the page of it that is on screen.
+//! An open book: the pages that have been rasterised, and what the reader has
+//! marked on them.
 //!
 //! Pages are rasterised by pdfium on a background thread and handed to GPUI as
 //! images. The bytes cross that boundary untouched: pdfium renders BGRA, and a
 //! [`RenderImage`] is BGRA, so the one format conversion this would obviously
 //! need does not exist.
+//!
+//! Only the pages near the one being read are kept. A thousand-page book at two
+//! pixels per point is several gigabytes; what the reader can see is a dozen
+//! megabytes, and the rest is a rasterise away.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{RenderImage, SharedString};
@@ -19,25 +25,18 @@ use pedro_pdf::{Document, PageImage, PageSize, PageText, PixelFormat, Rect};
 /// is a blurry page, and a book is a thing people look at closely.
 const OVERSAMPLE: f32 = 2.0;
 
-/// A book open in a tab.
-pub struct OpenDocument {
-    /// Shared with the background thread that rasterises pages.
-    pub document: Arc<Document>,
-    pub page_count: u32,
-    /// The size of the first page, in points, which is what every page is laid
-    /// out against. A book whose pages differ in size is rare enough that
-    /// measuring each one would cost more than it is worth.
-    pub size: PageSize,
-    /// One-based, the way the reader counts.
-    pub page: u32,
-    pub rendered: Option<Rendered>,
-    /// The text of the page on screen, with the box around every character.
-    /// What turns a drag across the page into a passage.
-    pub text: Option<PageText>,
-    pub selection: Option<Selection>,
-    /// Every passage marked in this book, so the ones on the page can be drawn
-    /// and the conversation behind one can be reopened by clicking it.
-    pub highlights: Vec<Highlight>,
+/// How many pages to keep rasterised on each side of the one being read.
+///
+/// Enough to cover a screen of a scrolling reader in both directions, so that
+/// scrolling back a page never waits for pdfium.
+const KEEP: u32 = 4;
+
+/// A page that has been rasterised, and the text that is on it.
+pub struct Page {
+    pub image: Arc<RenderImage>,
+    /// Every character and where it sits, which is what turns a drag into a
+    /// passage.
+    pub text: PageText,
 }
 
 /// A run of characters the reader has dragged across.
@@ -51,10 +50,26 @@ pub struct Selection {
     pub to: usize,
 }
 
-/// A page that has been rasterised and is ready to draw.
-pub struct Rendered {
+/// A book open in a tab.
+pub struct OpenDocument {
+    /// Shared with the background thread that rasterises pages.
+    pub document: Arc<Document>,
+    pub page_count: u32,
+    /// The size of the first page, in points, which every page is laid out
+    /// against. A book whose pages differ in size is rare enough that measuring
+    /// each one would cost more than it is worth.
+    pub size: PageSize,
+    /// The page at the top of the viewport, one-based, the way the reader
+    /// counts. What the composer quotes and where the place is saved.
     pub page: u32,
-    pub image: Arc<RenderImage>,
+    /// The pages that have been rasterised, by page number.
+    pub pages: HashMap<u32, Page>,
+    /// The pages pdfium is working on, so the same one is not asked for twice.
+    pub requested: HashSet<u32>,
+    pub selection: Option<Selection>,
+    /// Every passage marked in this book, so the ones on a page can be drawn and
+    /// the conversation behind one can be reopened by pressing it.
+    pub highlights: Vec<Highlight>,
 }
 
 impl OpenDocument {
@@ -66,22 +81,33 @@ impl OpenDocument {
             page_count,
             size,
             page: page.clamp(1, page_count.max(1)),
-            rendered: None,
-            text: None,
+            pages: HashMap::new(),
+            requested: HashSet::new(),
             selection: None,
             highlights: Vec::new(),
         }
     }
 
-    /// The image to draw, or `None` while the page is still being rasterised.
-    ///
-    /// A stale page is not drawn: showing the page you just left while the new
-    /// one renders looks like the page turn failed.
-    pub fn visible(&self) -> Option<&Arc<RenderImage>> {
-        self.rendered
-            .as_ref()
-            .filter(|rendered| rendered.page == self.page)
-            .map(|rendered| &rendered.image)
+    pub fn page(&self, page: u32) -> Option<&Page> {
+        self.pages.get(&page)
+    }
+
+    /// Whether `page` has to be rasterised before it can be drawn.
+    pub fn wants(&self, page: u32) -> bool {
+        page >= 1
+            && page <= self.page_count
+            && !self.pages.contains_key(&page)
+            && !self.requested.contains(&page)
+    }
+
+    /// Files a rasterised page, and forgets the ones the reader has left far
+    /// enough behind.
+    pub fn store(&mut self, page: u32, rasterised: Page) {
+        self.requested.remove(&page);
+        self.pages.insert(page, rasterised);
+
+        let here = self.page;
+        self.pages.retain(|number, _| number.abs_diff(here) <= KEEP);
     }
 
     /// How wide the page is when drawn `height` logical pixels tall.
@@ -95,33 +121,24 @@ impl OpenDocument {
         scale_for(self.size, height)
     }
 
-    /// Moves `by` pages, stopping at either cover. Returns whether it moved.
-    pub fn turn(&mut self, by: i64) -> bool {
+    /// Moves the page in view by `by`, stopping at either cover. Returns the
+    /// page that lands on, or `None` if it did not move.
+    pub fn turn(&mut self, by: i64) -> Option<u32> {
         let page = turned(self.page, self.page_count, by);
         let moved = page != self.page;
         self.page = page;
 
-        moved
+        moved.then_some(page)
     }
 
-    /// What the tab bar and the composer's context line say about where we are.
+    /// What the composer's context line says about where we are.
     pub fn position(&self) -> SharedString {
         format!("p. {} of {}", self.page, self.page_count).into()
     }
 
-    /// The text of the page under the pointer, once it has been extracted.
-    ///
-    /// `None` while a page is still being read, which is what makes a drag on a
-    /// page that has not finished loading do nothing rather than select the
-    /// wrong thing.
-    fn page_text(&self) -> Option<&PageText> {
-        self.text.as_ref()
-    }
-
-    /// Starts a selection at the character nearest `(x, y)`, in page fractions.
-    pub fn begin_selection(&mut self, x: f32, y: f32) {
-        let page = self.page;
-        let Some(index) = self.page_text().and_then(|text| text.char_near(x, y)) else {
+    /// Starts a selection on `page`, at the character nearest `(x, y)`.
+    pub fn begin_selection(&mut self, page: u32, x: f32, y: f32) {
+        let Some(index) = self.page(page).and_then(|held| held.text.char_near(x, y)) else {
             self.selection = None;
             return;
         };
@@ -133,60 +150,75 @@ impl OpenDocument {
         });
     }
 
-    /// Drags the far end of the selection to `(x, y)`.
-    pub fn extend_selection(&mut self, x: f32, y: f32) {
-        let Some(index) = self.page_text().and_then(|text| text.char_near(x, y)) else {
+    /// Drags the far end of the selection to `(x, y)` on `page`.
+    ///
+    /// A drag that leaves the page it started on is ignored rather than
+    /// restarted: passages that span a page break are not selectable yet, and
+    /// silently moving the selection to another page would lose the one the
+    /// reader was making.
+    pub fn extend_selection(&mut self, page: u32, x: f32, y: f32) {
+        let Some(selection) = self.selection else {
             return;
         };
-        let Some(selection) = &mut self.selection else {
+        if selection.page != page {
+            return;
+        }
+        let Some(index) = self.page(page).and_then(|held| held.text.char_near(x, y)) else {
             return;
         };
 
-        selection.to = index;
+        self.selection = Some(Selection {
+            to: index,
+            ..selection
+        });
     }
 
-    /// The selection, if it is on the page being shown and covers anything.
+    /// The selection, if it covers anything at all.
     ///
     /// A selection of one character is a click, not a passage: dropping it is
-    /// what makes clicking the page clear the last highlight.
+    /// what makes pressing the page clear the last one.
     pub fn selection(&self) -> Option<Selection> {
         self.selection
-            .filter(|selection| selection.page == self.page && selection.from != selection.to)
+            .filter(|selection| selection.from != selection.to)
     }
 
     /// The passage the reader has selected.
     pub fn selected_text(&self) -> Option<String> {
         let selection = self.selection()?;
-        let text = self.page_text()?.slice(selection.from, selection.to);
+        let text = self
+            .page(selection.page)?
+            .text
+            .slice(selection.from, selection.to);
 
         (!text.trim().is_empty()).then_some(text)
     }
 
-    /// The passages marked on the page being shown.
-    pub fn highlights_here(&self) -> impl DoubleEndedIterator<Item = &Highlight> {
-        let page = self.page;
+    /// One rectangle per line of the selection, if it is on `page`.
+    pub fn selection_rects(&self, page: u32) -> Vec<Rect> {
+        match self.selection().filter(|selection| selection.page == page) {
+            Some(selection) => match self.page(page) {
+                Some(held) => held.text.line_rects(selection.from, selection.to),
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        }
+    }
 
+    /// The passages marked on `page`.
+    pub fn highlights_on(&self, page: u32) -> impl DoubleEndedIterator<Item = &Highlight> {
         self.highlights
             .iter()
             .filter(move |highlight| highlight.page_number == page)
     }
 
-    /// The marked passage under `(x, y)`, in page fractions.
+    /// The marked passage under `(x, y)` on `page`.
     ///
     /// The most recent wins where two overlap: a reader who marks the same
     /// sentence twice means the question they asked about it last.
-    pub fn highlight_at(&self, x: f32, y: f32) -> Option<&Highlight> {
-        self.highlights_here()
+    pub fn highlight_at(&self, page: u32, x: f32, y: f32) -> Option<&Highlight> {
+        self.highlights_on(page)
             .filter(|highlight| highlight.rects.iter().any(|rect| rect.contains(x, y)))
             .next_back()
-    }
-
-    /// One rectangle per line of the selection, to draw over the page.
-    pub fn selection_rects(&self) -> Vec<Rect> {
-        match (self.selection(), self.page_text()) {
-            (Some(selection), Some(text)) => text.line_rects(selection.from, selection.to),
-            _ => Vec::new(),
-        }
     }
 }
 

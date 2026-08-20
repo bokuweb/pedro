@@ -1,22 +1,16 @@
-//! Open documents, one tab each, with the page layout toggles on the trailing
-//! edge.
-//!
-//! The toggles used to have a bar of their own. Two horizontal bands above the
-//! page is one more than the reading area can spare, and the toggles are about
-//! the document the tabs name anyway.
+//! Open documents, one tab each.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use gpui_component::tooltip::Tooltip;
 use gpui_component::{IconName, h_flex};
 
 use crate::app::Pedro;
 use crate::palette;
-use crate::state::{OpenTab, PageLayout};
-use crate::ui::{icon, square_button, vertical_rule};
+use crate::state::OpenTab;
+use crate::ui::icon;
 
 const HEIGHT: f32 = 44.;
 
@@ -45,43 +39,11 @@ impl Pedro {
                     .min_w_0()
                     .overflow_x_scroll()
                     .children(tabs),
-            )
-            .child(vertical_rule(px(20.)))
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .gap(px(2.))
-                    .child(self.render_layout_toggle(PageLayout::Single, cx))
-                    .child(self.render_layout_toggle(PageLayout::Spread, cx)),
             );
 
         // The other row along the top edge, and the one a reader is most likely
         // to reach for when there is no title bar to grab.
         self.draggable(bar, cx)
-    }
-
-    fn render_layout_toggle(
-        &self,
-        layout: PageLayout,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let active = self.layout == layout;
-        let label = layout.label();
-
-        square_button(px(28.), active)
-            .id(("layout", layout as usize))
-            .child(icon(
-                layout.icon(),
-                px(15.),
-                if active {
-                    palette::text()
-                } else {
-                    palette::text_faint()
-                },
-            ))
-            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| this.set_layout(layout, cx)))
     }
 
     fn render_tab(

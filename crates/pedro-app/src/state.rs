@@ -418,29 +418,6 @@ impl AgentStatus {
     }
 }
 
-/// How pages are arranged in the reader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageLayout {
-    Single,
-    Spread,
-}
-
-impl PageLayout {
-    pub fn icon(self) -> IconName {
-        match self {
-            PageLayout::Single => IconName::Frame,
-            PageLayout::Spread => IconName::LayoutDashboard,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PageLayout::Single => "Single page",
-            PageLayout::Spread => "Two-page spread",
-        }
-    }
-}
-
 /// A document opened in the tab bar.
 pub struct OpenTab {
     pub id: SharedString,
