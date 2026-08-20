@@ -40,6 +40,10 @@ pub enum Library {
     Opening,
     Ready {
         store: SharedStore,
+        /// Where the books are kept. Held here so that saying so costs no lock:
+        /// an answer being written holds the store for as long as the agent
+        /// takes to write it.
+        root: std::path::PathBuf,
         books: Vec<Book>,
     },
     /// The library could not be opened at all — a read-only home directory, a
@@ -58,6 +62,13 @@ impl Library {
     pub fn store(&self) -> Option<&SharedStore> {
         match self {
             Library::Ready { store, .. } => Some(store),
+            _ => None,
+        }
+    }
+
+    pub fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            Library::Ready { root, .. } => Some(root),
             _ => None,
         }
     }

@@ -16,7 +16,7 @@ use gpui::{
 use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
 
-use crate::app::{FocusSearch, NextPage, Pedro, PreviousPage};
+use crate::app::{FocusSearch, NextPage, Pedro, PreviousPage, ZoomIn, ZoomOut, ZoomReset};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -35,6 +35,12 @@ fn main() {
                 // while the reader is typing a question.
                 KeyBinding::new("right", NextPage, Some("Pedro")),
                 KeyBinding::new("left", PreviousPage, Some("Pedro")),
+                // Both spellings of the same key: the plus is a shifted equals
+                // on most layouts, and readers press whichever they think of.
+                KeyBinding::new("cmd-=", ZoomIn, None),
+                KeyBinding::new("cmd-+", ZoomIn, None),
+                KeyBinding::new("cmd--", ZoomOut, None),
+                KeyBinding::new("cmd-0", ZoomReset, None),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);

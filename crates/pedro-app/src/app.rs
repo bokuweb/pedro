@@ -29,14 +29,28 @@ use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
 
-actions!(pedro, [FocusSearch, NextPage, PreviousPage]);
+actions!(
+    pedro,
+    [
+        FocusSearch,
+        NextPage,
+        PreviousPage,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset
+    ]
+);
 
-/// How tall a page is drawn, in logical pixels.
+/// How tall a page is drawn at 100%, in logical pixels.
 ///
-/// Fixed for now: fitting to the window means measuring it, and measuring it
-/// means re-rasterising every page on every resize. A constant gets real pages
-/// on screen; the zoom control is what will replace it.
+/// A page fills a comfortable window at this size. It is not fitted to the
+/// window, because fitting means re-rasterising every page on every resize;
+/// the zoom is how a reader who wants a different size asks for one.
 pub(crate) const PAGE_HEIGHT: f32 = 640.;
+
+/// What zoom can be set to. A book is read at one of a few sizes, and a
+/// continuous zoom would rasterise a new page for every step of the way.
+const ZOOM_STEPS: [f32; 7] = [0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 
 pub struct Pedro {
     focus_handle: FocusHandle,
@@ -59,6 +73,12 @@ pub struct Pedro {
     /// Whether the sidebar is showing the places that are settings rather than
     /// reading.
     pub(crate) show_secondary: bool,
+    /// Which installed CLI answers a question. `None` means whichever was found
+    /// first, which is what a reader with one installed never has to think
+    /// about.
+    pub(crate) answering: Option<pedro_agent::AgentKind>,
+    /// How large a page is drawn, as a multiple of [`PAGE_HEIGHT`].
+    pub(crate) zoom: f32,
     /// Where each page was drawn, recorded while the frame is laid out. A drag
     /// arrives in window coordinates and a page needs it as a fraction of
     /// itself.
@@ -111,6 +131,8 @@ impl Pedro {
             library,
             chat: None,
             show_secondary: false,
+            answering: None,
+            zoom: 1.0,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
             selecting: false,
@@ -170,6 +192,7 @@ impl Pedro {
             Ok((store, books)) => {
                 tracing::info!(books = books.len(), "opened the library");
                 Library::Ready {
+                    root: store.root().to_path_buf(),
                     store: SharedStore::new(store),
                     books,
                 }
@@ -284,6 +307,9 @@ impl Pedro {
                 page: open.map_or(1, |open| open.page),
                 highlights: open.map(|open| open.highlights.as_slice()).unwrap_or(&[]),
                 chat: self.chat.as_ref(),
+                answering: self.answering_kind(),
+                library_path: self.library.path(),
+                zoom: self.zoom,
             },
         )
     }
@@ -329,6 +355,11 @@ impl Pedro {
 
         if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
             self.open_marked_passage(&highlight_id.to_owned(), cx);
+            return;
+        }
+
+        if let Some(program) = entry.id.strip_prefix("agent:") {
+            self.choose_agent(&program.to_owned(), cx);
             return;
         }
 
@@ -475,7 +506,8 @@ impl Pedro {
             return;
         };
         let document = open.document.clone();
-        let scale = open.scale_for(PAGE_HEIGHT);
+        let scale = open.scale_for(self.page_height());
+        let generation = open.generation;
 
         cx.spawn(async move |this, cx| {
             let rendered = cx
@@ -500,7 +532,7 @@ impl Pedro {
                 .await;
 
             this.update(cx, |this, cx| {
-                this.page_rendered(&tab_id, page, rendered, cx)
+                this.page_rendered(&tab_id, page, generation, rendered, cx)
             })
             .ok();
         })
@@ -511,6 +543,7 @@ impl Pedro {
         &mut self,
         tab_id: &str,
         page: u32,
+        generation: u64,
         rendered: Result<
             (
                 pedro_pdf::PageImage,
@@ -527,6 +560,11 @@ impl Pedro {
         let Some(open) = &mut tab.document else {
             return;
         };
+
+        // Rasterised for a size the reader has since changed.
+        if open.generation != generation {
+            return;
+        }
 
         match rendered {
             Ok((image, text, size)) => {
@@ -813,7 +851,7 @@ impl Pedro {
         let Some(store) = self.library.store().cloned() else {
             return;
         };
-        let Some(agent) = self.first_agent() else {
+        let Some(agent) = self.answering_agent().cloned() else {
             self.notice = Some("No agent CLI was found. Install claude or codex.".into());
             cx.notify();
             return;
@@ -900,11 +938,81 @@ impl Pedro {
         ))
     }
 
-    fn first_agent(&self) -> Option<pedro_agent::DiscoveredAgent> {
-        match &self.agent_status {
-            AgentStatus::Done(agents) => agents.first().cloned(),
-            AgentStatus::Detecting => None,
+    /// The CLI that answers: the one the reader chose, or the first found.
+    pub(crate) fn answering_agent(&self) -> Option<&pedro_agent::DiscoveredAgent> {
+        let AgentStatus::Done(agents) = &self.agent_status else {
+            return None;
+        };
+
+        match self.answering {
+            Some(chosen) => agents
+                .iter()
+                .find(|agent| agent.kind == chosen)
+                .or_else(|| agents.first()),
+            None => agents.first(),
         }
+    }
+
+    /// Which CLI is answering, for the panel that lets it be changed.
+    pub(crate) fn answering_kind(&self) -> Option<pedro_agent::AgentKind> {
+        self.answering_agent().map(|agent| agent.kind)
+    }
+
+    fn choose_agent(&mut self, program: &str, cx: &mut Context<Self>) {
+        let AgentStatus::Done(agents) = &self.agent_status else {
+            return;
+        };
+
+        if let Some(agent) = agents.iter().find(|agent| agent.kind.program() == program) {
+            self.answering = Some(agent.kind);
+            cx.notify();
+        }
+    }
+
+    /// Draws pages larger or smaller, one step at a time.
+    ///
+    /// Every page held is thrown away: they were rasterised for the old size,
+    /// and drawing them at the new one is a blurry page that never sharpens.
+    /// Work already in flight is not cancelled but is dropped when it lands,
+    /// which is what the generation counter is for.
+    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        if (self.zoom - zoom).abs() < f32::EPSILON {
+            return;
+        }
+
+        self.zoom = zoom;
+        if let Some(open) = self.document_mut() {
+            open.resized();
+        }
+
+        cx.notify();
+    }
+
+    fn step_zoom(&mut self, by: i32, cx: &mut Context<Self>) {
+        let here = ZOOM_STEPS
+            .iter()
+            .position(|step| (step - self.zoom).abs() < f32::EPSILON)
+            .unwrap_or(2);
+        let next = (here as i32 + by).clamp(0, ZOOM_STEPS.len() as i32 - 1) as usize;
+
+        self.set_zoom(ZOOM_STEPS[next], cx);
+    }
+
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_zoom(1, cx);
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_zoom(-1, cx);
+    }
+
+    fn zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_zoom(1.0, cx);
+    }
+
+    /// How tall a page is drawn right now.
+    pub(crate) fn page_height(&self) -> f32 {
+        PAGE_HEIGHT * self.zoom
     }
 
     fn answer_arriving(&mut self, delta: &str, cx: &mut Context<Self>) {
@@ -1025,6 +1133,9 @@ impl Render for Pedro {
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::previous_page))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
             .size_full()
             .text_color(cx.theme().foreground)
             .text_size(px(15.))

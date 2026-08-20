@@ -380,10 +380,10 @@ impl Pedro {
     /// account; the equivalent fact — whose credentials are about to answer a
     /// question — is the CLI it found.
     fn render_agent_footer(&self) -> impl IntoElement + use<> {
-        let (name, detail): (SharedString, SharedString) = match &self.agent_status {
-            AgentStatus::Detecting => ("Looking…".into(), "for an agent CLI".into()),
-            AgentStatus::Done(agents) => match agents.first() {
-                Some(agent) => (
+        let (name, detail): (SharedString, SharedString) =
+            match (&self.agent_status, self.answering_agent()) {
+                (AgentStatus::Detecting, _) => ("Looking…".into(), "for an agent CLI".into()),
+                (_, Some(agent)) => (
                     agent.kind.display_name().into(),
                     agent
                         .version
@@ -391,9 +391,8 @@ impl Pedro {
                         .unwrap_or_else(|| "installed".to_owned())
                         .into(),
                 ),
-                None => ("No agent".into(), "install claude or codex".into()),
-            },
-        };
+                (_, None) => ("No agent".into(), "install claude or codex".into()),
+            };
 
         // The first letter, the way the reference design badges an account.
         let initial: SharedString = name.chars().next().unwrap_or('?').to_string().into();

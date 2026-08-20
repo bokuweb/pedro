@@ -116,12 +116,10 @@ impl Pedro {
 
     /// Which CLI is about to answer.
     fn render_agent_chip(&self) -> impl IntoElement + use<> {
-        let label: SharedString = match &self.agent_status {
-            AgentStatus::Detecting => "Looking…".into(),
-            AgentStatus::Done(agents) => match agents.first() {
-                Some(agent) => agent.kind.display_name().into(),
-                None => "No agent CLI".into(),
-            },
+        let label: SharedString = match (&self.agent_status, self.answering_agent()) {
+            (AgentStatus::Detecting, _) => "Looking…".into(),
+            (_, Some(agent)) => agent.kind.display_name().into(),
+            (_, None) => "No agent CLI".into(),
         };
         let tint = if self.agent_status.is_problem() {
             palette::danger()
@@ -210,6 +208,7 @@ impl Pedro {
 
     /// What the question is about: the document, and the place in it.
     fn render_context_line(&self) -> impl IntoElement + use<> {
+        let zoomed = ((self.zoom - 1.0).abs() > 0.001).then_some(self.zoom);
         let document: SharedString = match self.active_tab() {
             // The page matters as much as the book: a question is about the
             // passage in front of the reader, not about the whole volume.
@@ -240,19 +239,32 @@ impl Pedro {
                             .child(document),
                     ),
             )
-            .children(self.open_document().map(|open| {
+            .child(
                 h_flex()
                     .flex_shrink_0()
-                    .gap(px(6.))
+                    .gap(px(10.))
                     .items_center()
-                    .child(icon(IconName::File, px(12.), palette::text_faint()))
-                    .child(
+                    .children(self.open_document().map(|open| {
                         div()
                             .text_size(px(11.))
                             .text_color(palette::text_faint())
-                            .child(format!("{} pages", open.page_count)),
-                    )
-            }))
+                            .child(format!("{} pages", open.page_count))
+                    }))
+                    // Only when it is not the size a page is normally drawn at:
+                    // a reader who has not zoomed does not need telling.
+                    .children(zoomed.map(|zoom| {
+                        h_flex()
+                            .gap(px(5.))
+                            .items_center()
+                            .child(icon(IconName::Frame, px(12.), palette::text_faint()))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(palette::text_faint())
+                                    .child(format!("{:.0}%", zoom * 100.0)),
+                            )
+                    })),
+            )
     }
 }
 

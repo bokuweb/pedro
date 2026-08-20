@@ -7,7 +7,7 @@
 
 use gpui::SharedString;
 use gpui_component::IconName;
-use pedro_agent::DiscoveredAgent;
+use pedro_agent::{AgentKind, DiscoveredAgent};
 use pedro_core::model::{Book, Highlight};
 use pedro_pdf::OutlineItem;
 
@@ -298,25 +298,63 @@ impl Panel {
         )
     }
 
-    fn settings() -> Self {
+    /// What pedro is actually doing, rather than knobs it does not have.
+    ///
+    /// Every row here is a fact worth checking when something is wrong: where
+    /// the books are, which pdfium is drawing them, how big a page is drawn.
+    fn settings(shown: &Shown<'_>) -> Self {
+        let library = match shown.library {
+            Library::Ready { .. } => shown
+                .library_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "opened".to_owned()),
+            Library::Opening => "opening…".to_owned(),
+            Library::Failed(why) => why.to_string(),
+        };
+
+        let pdfium = pedro_pdf::library_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not loaded yet".to_owned());
+
         Self::new(
-            vec![Section::new(
-                "Preferences",
-                vec![
-                    Entry::new("set:appearance", "Appearance").icon(IconName::Palette),
-                    Entry::new("set:reading", "Reading").icon(IconName::BookOpen),
-                    Entry::new("set:agents", "Agents").icon(IconName::Bot),
-                ],
-            )],
+            vec![
+                Section::new(
+                    "Library",
+                    vec![
+                        Entry::new("about:library", "Where the books are")
+                            .icon(IconName::Folder)
+                            .detail(library)
+                            .read_only(),
+                        Entry::new("about:books", "Books")
+                            .icon(IconName::GalleryVerticalEnd)
+                            .trailing(format!("{}", shown.library.books().len()))
+                            .read_only(),
+                    ],
+                ),
+                Section::new(
+                    "Reading",
+                    vec![
+                        Entry::new("about:zoom", "Page size")
+                            .icon(IconName::Frame)
+                            .trailing(format!("{:.0}%", shown.zoom * 100.0))
+                            .read_only(),
+                        Entry::new("about:pdfium", "Drawn by")
+                            .icon(IconName::File)
+                            .detail(pdfium)
+                            .read_only(),
+                    ],
+                ),
+            ],
             "",
         )
     }
 
     /// Built from whatever CLI discovery found.
-    pub fn agents(status: &AgentStatus) -> Self {
+    /// The CLIs found on this machine, and which of them answers.
+    pub fn agents(status: &AgentStatus, answering: Option<AgentKind>) -> Self {
         let entries = match status {
             AgentStatus::Detecting => vec![
-                Entry::new("agent:detecting", "Looking for installed CLIs...")
+                Entry::new("agent:detecting", "Looking for installed CLIs…")
                     .icon(IconName::LoaderCircle)
                     .read_only(),
             ],
@@ -324,11 +362,12 @@ impl Panel {
                 .iter()
                 .map(|agent| {
                     let entry = Entry::new(
-                        format!("agent:{}", agent.program.display()),
+                        format!("agent:{}", agent.kind.program()),
                         agent.kind.display_name(),
                     )
                     .icon(IconName::SquareTerminal)
-                    .read_only();
+                    .detail(agent.program.display().to_string())
+                    .current(answering == Some(agent.kind));
 
                     match &agent.version {
                         Some(version) => entry.trailing(version.clone()),
@@ -339,7 +378,7 @@ impl Panel {
         };
 
         Self::new(
-            vec![Section::new("Detected", entries)],
+            vec![Section::new("Installed", entries)],
             "No agent CLI found. Install claude or codex and restart pedro.",
         )
     }
@@ -349,8 +388,8 @@ impl Panel {
             RailItem::Library => Self::library(shown.library),
             RailItem::Reader => Self::reader(shown.outline, shown.page),
             RailItem::Highlights => Self::highlights(shown.highlights, shown.chat),
-            RailItem::Agents => Self::agents(shown.status),
-            RailItem::Settings => Self::settings(),
+            RailItem::Agents => Self::agents(shown.status, shown.answering),
+            RailItem::Settings => Self::settings(shown),
         }
     }
 }
@@ -365,6 +404,12 @@ pub struct Shown<'a> {
     pub highlights: &'a [Highlight],
     /// The conversation that is open, so the passage behind it can say so.
     pub chat: Option<&'a Conversation>,
+    /// Which CLI answers a question.
+    pub answering: Option<AgentKind>,
+    /// Where the books are kept, once the library is open.
+    pub library_path: Option<&'a std::path::Path>,
+    /// How large a page is drawn, as a multiple of its natural size.
+    pub zoom: f32,
 }
 
 /// A passage as one line, for a list that has room for one.

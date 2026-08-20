@@ -70,6 +70,10 @@ pub struct OpenDocument {
     pub pages: HashMap<u32, Page>,
     /// The pages pdfium is working on, so the same one is not asked for twice.
     pub requested: HashSet<u32>,
+    /// Bumped whenever the size a page is drawn at changes. Work already in
+    /// flight was started for the old size, and is dropped when it lands rather
+    /// than being drawn at a size it was not made for.
+    pub generation: u64,
     pub selection: Option<Selection>,
     /// Every passage marked in this book, so the ones on a page can be drawn and
     /// the conversation behind one can be reopened by pressing it.
@@ -87,6 +91,7 @@ impl OpenDocument {
             page: page.clamp(1, page_count.max(1)),
             pages: HashMap::new(),
             requested: HashSet::new(),
+            generation: 0,
             selection: None,
             highlights: Vec::new(),
         }
@@ -102,6 +107,15 @@ impl OpenDocument {
             && page <= self.page_count
             && !self.pages.contains_key(&page)
             && !self.requested.contains(&page)
+    }
+
+    /// Throws away every page, because the size they were drawn for has
+    /// changed. Pages still being rasterised are left to finish and dropped on
+    /// arrival.
+    pub fn resized(&mut self) {
+        self.pages.clear();
+        self.requested.clear();
+        self.generation += 1;
     }
 
     /// Files a rasterised page, and forgets the ones the reader has left far

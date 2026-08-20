@@ -22,7 +22,7 @@ use gpui::{
 use gpui_component::{IconName, h_flex, v_flex};
 use pedro_pdf::Rect;
 
-use crate::app::{PAGE_HEIGHT, Pedro};
+use crate::app::Pedro;
 use crate::palette;
 use crate::ui::icon;
 
@@ -65,15 +65,16 @@ impl Pedro {
 
     /// One page, centred in a row of its own.
     fn render_page_row(&self, page: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let height = self.page_height();
         let Some(open) = self.open_document() else {
-            return div().h(px(PAGE_HEIGHT + GAP)).into_any_element();
+            return div().h(px(height + GAP)).into_any_element();
         };
 
         // The page's own shape where it is known. Books whose pages differ in
         // size — a cover, a fold-out — would otherwise be stretched into the
         // first page's proportions, and a mark drawn in fractions of a
         // stretched page does not sit on its words.
-        let width = open.width_of(page, PAGE_HEIGHT);
+        let width = open.width_of(page, height);
         let marks: Vec<Rect> = open
             .highlights_on(page)
             .flat_map(|highlight| highlight.rects.iter().copied())
@@ -81,13 +82,14 @@ impl Pedro {
 
         let sheet = render_sheet(
             width,
+            height,
             open.page(page).map(|held| held.image.clone()),
             marks,
             open.selection_rects(page),
         );
 
         h_flex()
-            .h(px(PAGE_HEIGHT + GAP))
+            .h(px(height + GAP))
             .w_full()
             .justify_center()
             .items_start()
@@ -146,6 +148,7 @@ impl Pedro {
 /// reader has marked.
 fn render_sheet(
     width: f32,
+    height: f32,
     image: Option<Arc<RenderImage>>,
     marks: Vec<Rect>,
     selection: Vec<Rect>,
@@ -153,12 +156,12 @@ fn render_sheet(
     div()
         .relative()
         .w(px(width))
-        .h(px(PAGE_HEIGHT))
+        .h(px(height))
         .rounded(px(3.))
         .bg(palette::page())
         .shadow_lg()
         .overflow_hidden()
-        .children(image.map(|image| img(image).w(px(width)).h(px(PAGE_HEIGHT))))
+        .children(image.map(|image| img(image).w(px(width)).h(px(height))))
         .children(
             marks
                 .into_iter()
@@ -197,12 +200,7 @@ fn render_opening() -> impl IntoElement {
         .justify_center()
         .items_start()
         .pt(px(GAP))
-        .child(render_sheet(
-            PAGE_HEIGHT * 0.75,
-            None,
-            Vec::new(),
-            Vec::new(),
-        ))
+        .child(render_sheet(480., 640., None, Vec::new(), Vec::new()))
 }
 
 fn render_failure(title: SharedString, why: SharedString) -> impl IntoElement {
