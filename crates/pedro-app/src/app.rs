@@ -6,18 +6,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, SharedString,
     Styled as _, Window, actions, div, px,
 };
 use gpui_component::input::InputState;
-use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
-use pedro_core::model::Book;
+use pedro_core::model::{Book, ChatMessage, NewHighlight};
 use pedro_core::store::Store;
+use pedro_core::{Question, ask};
 use pedro_pdf::{Document, PageSize};
 
+use crate::chat::Conversation;
 use crate::document::{OpenDocument, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
@@ -47,6 +50,11 @@ pub struct Pedro {
     pub(crate) layout: PageLayout,
     pub(crate) agent_status: AgentStatus,
     pub(crate) library: Library,
+    /// The conversation the chat panel is showing, if one is open.
+    pub(crate) chat: Option<Conversation>,
+    /// Whether the sidebar is showing the places that are settings rather than
+    /// reading.
+    pub(crate) show_secondary: bool,
     /// Where the page is on screen, recorded while it is drawn. A drag arrives
     /// in window coordinates and the page needs it as a fraction of itself.
     pub(crate) page_bounds: Option<Bounds<Pixels>>,
@@ -96,6 +104,8 @@ impl Pedro {
             layout: PageLayout::Single,
             agent_status,
             library,
+            chat: None,
+            show_secondary: false,
             page_bounds: None,
             selecting: false,
             notice: None,
@@ -323,7 +333,7 @@ impl Pedro {
             return;
         };
 
-        let path = store.lock().document_path(&book);
+        let store = store.clone();
         let page = book.reading.as_ref().map_or(1, |reading| reading.page);
         let tab_id: SharedString = format!("book:{book_id}").into();
 
@@ -331,6 +341,10 @@ impl Pedro {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
+                    // Locked here rather than on the UI thread: an answer being
+                    // written holds this same lock for as long as the agent
+                    // takes, and the window must not wait on that.
+                    let path = store.lock().document_path(&book);
                     let document = Document::open(&path).map_err(|err| err.to_string())?;
                     // Every page is laid out against the first one's size, so
                     // it is read here rather than on the UI thread later.
@@ -583,23 +597,172 @@ impl Pedro {
         }
     }
 
+    pub(crate) fn toggle_secondary(&mut self, cx: &mut Context<Self>) {
+        self.show_secondary = !self.show_secondary;
+        cx.notify();
+    }
+
     pub(crate) fn toggle_web_search(&mut self, cx: &mut Context<Self>) {
         self.web_search = !self.web_search;
         cx.notify();
     }
 
-    /// Sends what is in the composer.
+    /// Asks the agent about the marked passage.
     ///
-    /// Deliberately loud rather than silently doing nothing: the field, the
-    /// agent chip and the web toggle are all real, and the only missing piece
-    /// is the wiring to `pedro-core`.
+    /// The passage is stored as a highlight first: chatbook hangs a
+    /// conversation off a highlight rather than off a page, so that reopening
+    /// the mark reopens what was said about it.
     pub(crate) fn ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let question = self.composer.read(cx).value().trim().to_string();
         if question.is_empty() {
             return;
         }
+        if self.chat.as_ref().is_some_and(Conversation::is_answering) {
+            return;
+        }
 
-        window.push_notification("Asking is not wired to the reader yet.", cx);
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+        let Some(agent) = self.first_agent() else {
+            self.notice = Some("No agent CLI was found. Install claude or codex.".into());
+            cx.notify();
+            return;
+        };
+        let Some((book_id, highlight)) = self.marked_passage() else {
+            self.notice = Some("Drag across the page to choose a passage first.".into());
+            cx.notify();
+            return;
+        };
+
+        let conversation = self.chat.get_or_insert_with(|| {
+            Conversation::about(highlight.selected_text.clone(), highlight.page_number)
+        });
+        conversation.asked(question.clone());
+        let cancellation = conversation.cancellation.clone();
+
+        self.composer
+            .update(cx, |composer, cx| composer.set_value("", window, cx));
+
+        let web_search = self.web_search;
+        // Deltas arrive on the agent's thread and the view lives on this one,
+        // so they travel by channel rather than by lock.
+        let (deltas, mut arriving) = futures::channel::mpsc::unbounded::<String>();
+
+        let answering = cx.background_executor().spawn(async move {
+            let store = store.lock();
+            let stored = store
+                .add_highlight(&book_id, highlight)
+                .map_err(|err| err.to_string())?;
+
+            let answer = ask(
+                &store,
+                &agent,
+                &Question {
+                    highlight_id: stored.id.clone(),
+                    text: question,
+                    web_search,
+                },
+                &cancellation,
+                &mut |delta| {
+                    // A closed receiver means the reader moved on; the run is
+                    // left to finish and store its answer regardless.
+                    let _ = deltas.unbounded_send(delta.to_owned());
+                },
+            );
+
+            match answer {
+                Ok(_) => store.messages(&stored.id).map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            }
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(delta) = arriving.next().await {
+                if this
+                    .update(cx, |this, cx| this.answer_arriving(&delta, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            let finished = answering.await;
+            this.update(cx, |this, cx| this.answered(finished, cx)).ok();
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    /// The passage to ask about, and the book it is in.
+    fn marked_passage(&self) -> Option<(String, NewHighlight)> {
+        let tab = self.active_tab()?;
+        let book_id = tab.id.strip_prefix("book:")?.to_owned();
+        let open = tab.document.as_ref()?;
+
+        Some((
+            book_id,
+            NewHighlight {
+                selected_text: open.selected_text()?,
+                page_number: open.page,
+                rects: open.selection_rects(),
+            },
+        ))
+    }
+
+    fn first_agent(&self) -> Option<pedro_agent::DiscoveredAgent> {
+        match &self.agent_status {
+            AgentStatus::Done(agents) => agents.first().cloned(),
+            AgentStatus::Detecting => None,
+        }
+    }
+
+    fn answer_arriving(&mut self, delta: &str, cx: &mut Context<Self>) {
+        if let Some(chat) = &mut self.chat {
+            chat.streaming.push_str(delta);
+            cx.notify();
+        }
+    }
+
+    fn answered(&mut self, finished: Result<Vec<ChatMessage>, String>, cx: &mut Context<Self>) {
+        if let Some(chat) = &mut self.chat {
+            match finished {
+                Ok(messages) => chat.answered(messages),
+                Err(why) => {
+                    tracing::error!(why, "the agent did not answer");
+                    chat.failed(why);
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Stops an answer that is still being written.
+    pub(crate) fn stop_answering(&mut self, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.chat {
+            chat.cancellation.cancel();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn close_chat(&mut self, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.chat {
+            chat.cancellation.cancel();
+        }
+        self.chat = None;
+        cx.notify();
+    }
+
+    /// Jumps to the page a citation names.
+    pub(crate) fn show_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        let Some(open) = self.document_mut() else {
+            return;
+        };
+
+        let by = page as i64 - open.page as i64;
+        self.turn_page(by, cx);
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -630,8 +793,7 @@ impl Render for Pedro {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_rail(window, cx))
-                    .child(self.render_sidebar(cx))
+                    .child(self.render_sidebar(window, cx))
                     .child(
                         v_flex()
                             .flex_1()
@@ -647,7 +809,19 @@ impl Render for Pedro {
                             // laying down another film of their own.
                             .bg(palette::canvas())
                             .child(self.render_tab_bar(cx))
-                            .child(div().flex_1().min_h_0().child(self.render_reader(cx)))
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .child(self.render_reader(cx)),
+                                    )
+                                    .children(self.render_chat(cx)),
+                            )
                             .child(self.render_composer(cx)),
                     ),
             )

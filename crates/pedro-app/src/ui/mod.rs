@@ -1,8 +1,8 @@
 //! The visual shell, split by region. Each module adds an `impl Pedro` block
 //! with one `render_*` method.
 
+mod chat;
 mod composer;
-mod rail;
 mod reader;
 mod sidebar;
 mod tab_bar;

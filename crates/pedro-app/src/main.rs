@@ -2,6 +2,7 @@
 //! installed.
 
 mod app;
+mod chat;
 mod document;
 mod library;
 mod palette;
@@ -50,10 +51,10 @@ fn main() {
                     title: Some("Pedro".into()),
                     // There is no title bar and no strip standing in for one.
                     // The panels run to the top edge of the window and the
-                    // traffic lights sit in the rail, which is padded to clear
-                    // them; dragging is handled by the rows they sit beside.
+                    // traffic lights sit in the sidebar's first row, which is
+                    // indented to clear them and dragged to move the window.
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(6.), px(14.))),
+                    traffic_light_position: Some(point(px(18.), px(17.))),
                 }),
                 ..Default::default()
             };

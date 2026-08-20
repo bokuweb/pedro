@@ -1,5 +1,9 @@
-//! The panel between the rail and the reader: what the panel is, a search, a
-//! list of collapsible sections, and the agent pedro is talking to.
+//! Everything to the left of the page: the window controls, where in the
+//! application you are, what that place holds, and which agent is answering.
+//!
+//! There is no icon rail beside this. A column of icons whose labels are only
+//! ever a tooltip is a second navigation for the same six places this one
+//! already names, and it costs 64 points of every window to say less.
 //!
 //! Rows are separated by space rather than by hairlines, and the one you are on
 //! is a rounded fill inset from both edges. A list of documents is read by
@@ -8,7 +12,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::input::Input;
 use gpui_component::tooltip::Tooltip;
@@ -16,7 +20,7 @@ use gpui_component::{IconName, h_flex, v_flex};
 
 use crate::app::Pedro;
 use crate::palette;
-use crate::state::{AgentStatus, Entry, Section, Status};
+use crate::state::{AgentStatus, Entry, RailItem, Section, Status};
 use crate::ui::icon;
 
 const WIDTH: f32 = 300.;
@@ -25,8 +29,16 @@ const WIDTH: f32 = 300.;
 /// stops here, which is what makes it read as a card rather than a band.
 const INSET: f32 = 8.;
 
+/// Room for the macOS traffic lights, which live in this panel now that there
+/// is no title bar and no rail for them to live in.
+const LIGHTS: f32 = 84.;
+
 impl Pedro {
-    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_sidebar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         v_flex()
             .w(px(WIDTH))
             .h_full()
@@ -34,49 +46,148 @@ impl Pedro {
             .bg(palette::sidebar())
             .border_r_1()
             .border_color(palette::border())
-            .child(self.render_panel_header(cx))
+            .child(self.render_window_row(window, cx))
+            .child(self.render_navigation(cx))
             .child(self.render_search())
             .children(self.render_notice())
             .child(self.render_sections(cx))
             .child(self.render_agent_footer())
     }
 
-    /// What the panel is, with the affordance to add to it.
-    fn render_panel_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let title = self.active_rail.title();
+    /// The row the window controls sit in, with the panel's own actions beside
+    /// them. Dragging it moves the window, the way a title bar would.
+    fn render_window_row(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let hint = self.active_rail.hint();
+        let indent = if window.is_fullscreen() {
+            INSET
+        } else {
+            LIGHTS
+        };
 
-        // This row runs along the top edge where a title bar would have been,
-        // so it does a title bar's other job (see `ui::window_drag`).
-        let header = h_flex()
-            .id("panel-header")
+        let row = h_flex()
+            .id("window-row")
             .h(px(46.))
-            .px(px(14.))
+            .pl(px(indent))
+            .pr(px(INSET))
+            .gap(px(2.))
+            .items_center()
+            .child(self.render_add_button(cx))
+            .child(
+                div()
+                    .id("panel-hint")
+                    .size(px(24.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|this| this.bg(palette::row_hover()))
+                    .child(icon(IconName::Info, px(14.), palette::text_faint()))
+                    .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx)),
+            )
+            .child(div().flex_1());
+
+        self.draggable(row, cx)
+    }
+
+    /// Where in the application the reader is.
+    ///
+    /// The four places a reader goes are always listed; the two that are
+    /// settings rather than reading are behind "More", which is where a thing
+    /// you touch twice a month belongs.
+    fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let primary: Vec<_> = RailItem::PRIMARY
+            .into_iter()
+            .map(|item| self.render_navigation_row(item, cx))
+            .collect();
+        let secondary: Vec<_> = if self.show_secondary {
+            RailItem::SECONDARY
+                .into_iter()
+                .map(|item| self.render_navigation_row(item, cx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let chevron = if self.show_secondary {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+
+        v_flex()
+            .flex_shrink_0()
+            .pb(px(6.))
+            .children(primary)
+            .child(
+                h_flex()
+                    .id("more")
+                    .h(px(30.))
+                    .mx(px(INSET))
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .items_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(palette::row_hover()))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_secondary(cx)))
+                    .child(icon(chevron, px(13.), palette::text_faint()))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(palette::text_faint())
+                            .child("More"),
+                    ),
+            )
+            .children(secondary)
+    }
+
+    fn render_navigation_row(
+        &self,
+        item: RailItem,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let active = self.active_rail == item;
+
+        h_flex()
+            .id(("navigate", item as usize))
+            .h(px(32.))
+            .mx(px(INSET))
+            .px(px(8.))
             .gap(px(9.))
             .items_center()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .when(active, |this| this.bg(palette::row_active()))
+            .when(!active, |this| {
+                this.hover(|this| this.bg(palette::row_hover()))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select_rail(item, cx)))
             .child(icon(
-                self.active_rail.icon(),
+                item.icon(),
                 px(15.),
-                palette::text_muted(),
+                if active {
+                    palette::text()
+                } else {
+                    palette::text_muted()
+                },
             ))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(14.))
-                    .text_color(palette::text())
-                    .child(title),
+                    .text_size(px(13.))
+                    .text_color(if active {
+                        palette::text()
+                    } else {
+                        palette::text_muted()
+                    })
+                    .child(item.title()),
             )
-            .child(
-                div()
-                    .id("panel-hint")
-                    .child(icon(IconName::Info, px(15.), palette::text_faint()))
-                    .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx)),
-            )
-            .child(self.render_add_button(cx));
-
-        self.draggable(header, cx)
     }
 
     /// The last thing that went wrong, where the reader was looking when it

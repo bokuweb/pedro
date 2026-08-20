@@ -34,12 +34,6 @@ pub fn chrome() -> Hsla {
     veiled(0x17101f, 0.5)
 }
 
-/// The narrow icon column on the far left. The most transparent surface in the
-/// window, so the eye reads it as the edge of the glass rather than as a panel.
-pub fn rail() -> Hsla {
-    veiled(0x160e1f, 0.66)
-}
-
 /// The panel between the rail and the reader.
 pub fn sidebar() -> Hsla {
     veiled(0x221530, 0.58)

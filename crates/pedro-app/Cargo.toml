@@ -22,5 +22,6 @@ gpui-component-assets.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+futures = "0.3"
 image = "0.25"
 time = "0.3"
