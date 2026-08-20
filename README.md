@@ -24,23 +24,25 @@ The plan, and the decisions behind it, are in [`docs/PORT_PLAN.md`](docs/PORT_PL
 
 ## Status
 
-Everything except the screens is implemented and tested, and the first two
-screens — the library and the reader — are real. What is missing is the part
-that makes it chatbook rather than a PDF viewer: selecting a passage and asking
-about it.
+The whole path works: add a book, read it, drag across a passage, ask about it,
+and the answer arrives beside the page with sources that turn back to it.
 
 | Area | State |
 | --- | --- |
-| Agent CLI discovery | Done (`pedro-agent`) |
-| Agent invocation: streaming, cancelling, both CLIs' event formats | Done (`pedro-agent`) |
-| PDF: pages, rasterisation, text with per-character boxes, outline | Done (`pedro-pdf`) |
-| Library: SQLite, content-addressed files, highlights, conversations, reading position | Done (`pedro-core`) |
-| Choosing a question's context, building the prompt, resolving citations to pages | Done (`pedro-core`) |
-| Asking about a highlight, end to end | Done (`pedro-core`, see `--example ask`) |
-| Application shell (rail, sidebar, tabs, reader canvas) | Done |
-| Library screen: adding a PDF, listing what is stored | Done |
-| Reader: real pages, page turning | Done |
-| Selecting a passage, highlights, the chat panel, the outline, settings | Not started |
+| Agent CLI discovery, and choosing between them | Done |
+| Agent invocation: streaming, cancelling, both CLIs' event formats | Done |
+| PDF: pages, rasterisation, text with per-character boxes, outline | Done |
+| Library: SQLite, content-addressed files, adding and removing books | Done |
+| Reader: continuous scroll, zoom, page turning, the place you left off | Done |
+| Selecting a passage by dragging, marks that stay on the page | Done |
+| Asking about a passage, the answer streaming in beside it | Done |
+| Sources that turn to the page they came from | Done |
+| Reopening a conversation from the mark that started it | Done |
+| Contents, Highlights, Agents and Settings panels | Done |
+| Keyboard: arrows to turn pages, ⌘± to zoom, ⌘K to search | Done |
+| Vim and Emacs key bindings | Not started |
+| Two-page spreads | Not started |
+| Reading a PDF out of Google Drive | Not started |
 
 ## Layout
 
@@ -82,13 +84,25 @@ chatbook's real thinking is — be covered by tests that run without a window.
 
 - At least one agent CLI installed and authenticated (`claude` or `codex`).
 
-## Running
-
-The application:
+## Using it
 
 ```bash
 cargo run -p pedro-app
 ```
+
+Add a PDF with the plus in the sidebar header. Open it, drag across a passage,
+type a question, and press the arrow. The answer streams into the panel beside
+the page; the sources under it turn the book to where they came from. The
+passage stays marked, and pressing a mark reopens what was asked about it.
+
+| | |
+| --- | --- |
+| Turn pages | `←` `→` |
+| Zoom | `⌘-` `⌘=` `⌘0` |
+| Search the sidebar | `⌘K` |
+| Choose which CLI answers | Agents, in the sidebar under More |
+| Stop an answer | Stop, under the answer being written |
+| Remove a book or a mark | Remove on its row, which asks twice |
 
 Ask a question about a real PDF without opening a window — the whole reading
 pipeline except the screens:

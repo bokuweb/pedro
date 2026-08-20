@@ -79,6 +79,12 @@ pub struct Pedro {
     pub(crate) answering: Option<pedro_agent::AgentKind>,
     /// How large a page is drawn, as a multiple of [`PAGE_HEIGHT`].
     pub(crate) zoom: f32,
+    /// The row whose remove button has been pressed once.
+    ///
+    /// Removing a book takes its highlights and conversations with it, so it
+    /// asks twice. A second press on the same row does it; a press anywhere
+    /// else changes its mind.
+    pub(crate) confirming_removal: Option<SharedString>,
     /// Where each page was drawn, recorded while the frame is laid out. A drag
     /// arrives in window coordinates and a page needs it as a fraction of
     /// itself.
@@ -133,6 +139,7 @@ impl Pedro {
             show_secondary: false,
             answering: None,
             zoom: 1.0,
+            confirming_removal: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
             selecting: false,
@@ -342,6 +349,12 @@ impl Pedro {
     /// Acts on a sidebar row: a book opens as a tab, a chapter turns to its
     /// page, a marked passage reopens the conversation about it.
     pub(crate) fn open_entry(&mut self, entry: &Entry, cx: &mut Context<Self>) {
+        // Pressing the row rather than its remove button is an answer too.
+        if self.confirming_removal.is_some() {
+            self.confirming_removal = None;
+            cx.notify();
+        }
+
         if !entry.openable {
             return;
         }
@@ -419,6 +432,18 @@ impl Pedro {
                     // Every page is laid out against the first one's size, so
                     // it is read here rather than on the UI thread later.
                     let size = document.page_size(0).map_err(|err| err.to_string())?;
+
+                    // A book stored with no table of contents may simply have
+                    // been read by a pedro that could not see the one it has.
+                    if book.outline.is_empty() {
+                        let outline = document.outline();
+                        if !outline.is_empty()
+                            && let Err(err) = store.lock().set_outline(&book.id, &outline)
+                        {
+                            tracing::warn!(?err, "could not store a recovered outline");
+                        }
+                    }
+
                     Ok::<_, String>((document, size, highlights))
                 })
                 .await;
@@ -822,6 +847,101 @@ impl Pedro {
 
     pub(crate) fn active_tab(&self) -> Option<&OpenTab> {
         self.active_tab.and_then(|index| self.tabs.get(index))
+    }
+
+    /// Whether this row is waiting to be told a second time.
+    pub(crate) fn is_confirming(&self, id: &SharedString) -> bool {
+        self.confirming_removal.as_ref() == Some(id)
+    }
+
+    /// Asks, then does it.
+    pub(crate) fn remove_entry(&mut self, entry: &Entry, cx: &mut Context<Self>) {
+        if !self.is_confirming(&entry.id) {
+            self.confirming_removal = Some(entry.id.clone());
+            cx.notify();
+            return;
+        }
+
+        self.confirming_removal = None;
+
+        if let Some(book_id) = entry.id.strip_prefix("book:") {
+            self.remove_book(&book_id.to_owned(), cx);
+        } else if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
+            self.remove_highlight(&highlight_id.to_owned(), cx);
+        }
+    }
+
+    /// Forgets a book, its marks, its conversations and its bytes.
+    fn remove_book(&mut self, book_id: &str, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        // Its tab goes with it: a tab of a book that is gone has nothing to
+        // draw and nothing to close it for.
+        let tab_id: SharedString = format!("book:{book_id}").into();
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+            self.close_tab(index, cx);
+        }
+        if self.chat.is_some() {
+            self.close_chat(cx);
+        }
+
+        let book_id = book_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let books = cx
+                .background_executor()
+                .spawn(async move {
+                    let store = store.lock();
+                    store.remove_book(&book_id).map_err(|err| err.to_string())?;
+                    store.books().map_err(|err| err.to_string())
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.documents_added(books.map(|books| (books, Vec::new())), cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Forgets a marked passage and the conversation about it.
+    fn remove_highlight(&mut self, highlight_id: &str, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        if self
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.highlight_id.as_deref() == Some(highlight_id))
+        {
+            self.close_chat(cx);
+        }
+
+        let highlight_id = highlight_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let removed = cx
+                .background_executor()
+                .spawn(async move {
+                    store
+                        .lock()
+                        .remove_highlight(&highlight_id)
+                        .map_err(|err| err.to_string())
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                if let Err(why) = removed {
+                    tracing::warn!(why, "could not remove the passage");
+                    this.notice = Some(why.into());
+                }
+                this.reload_highlights(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn toggle_secondary(&mut self, cx: &mut Context<Self>) {

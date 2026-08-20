@@ -33,6 +33,9 @@ const INSET: f32 = 8.;
 /// is no title bar and no rail for them to live in.
 const LIGHTS: f32 = 84.;
 
+/// Names the row a remove button hides inside until the row is hovered.
+const GROUP: &str = "row";
+
 impl Pedro {
     pub(crate) fn render_sidebar(
         &self,
@@ -351,6 +354,8 @@ impl Pedro {
 
         let row = div()
             .id(entry.id.clone())
+            .group(GROUP)
+            .relative()
             .mx(px(INSET))
             .mt(px(2.))
             .rounded(px(10.))
@@ -367,11 +372,59 @@ impl Pedro {
                     .on_click(cx.listener(move |this, _, _, cx| this.open_entry(&on_open, cx)))
             });
 
-        if entry.is_compact() {
-            return row.child(render_compact(entry, active));
-        }
+        let row = if entry.is_compact() {
+            row.child(render_compact(entry, active))
+        } else {
+            row.child(render_full(entry))
+        };
 
-        row.child(render_full(entry))
+        match entry.removable {
+            true => row.child(self.render_remove_button(entry, cx)),
+            false => row,
+        }
+    }
+
+    /// The remove affordance on a row, which asks before it does anything.
+    ///
+    /// Removing a book takes its marks and its conversations with it, so the
+    /// first press turns the button into the question and the second answers
+    /// it. A press anywhere else changes its mind.
+    fn render_remove_button(
+        &self,
+        entry: &Entry,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let confirming = self.is_confirming(&entry.id);
+        let on_remove = entry.clone();
+
+        div()
+            .id(SharedString::from(format!("remove:{}", entry.id)))
+            .absolute()
+            .top(px(6.))
+            .right(px(6.))
+            .px(px(7.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .when(!confirming, |this| {
+                this.invisible()
+                    .group_hover(GROUP, |this| this.visible())
+                    .bg(palette::surface())
+            })
+            .when(confirming, |this| this.bg(palette::danger().opacity(0.24)))
+            .hover(|this| this.bg(palette::danger().opacity(0.36)))
+            .text_size(px(10.))
+            .text_color(if confirming {
+                palette::danger()
+            } else {
+                palette::text_muted()
+            })
+            .child(if confirming { "Remove?" } else { "Remove" })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.remove_entry(&on_remove, cx);
+            }))
     }
 
     /// Which agent is answering, at the foot of the panel.

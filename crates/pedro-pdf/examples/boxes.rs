@@ -46,6 +46,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             boundary.0, boundary.1, boundary.2, boundary.3, boundary.4
         );
     }
+    let outline = document.outline();
+    println!("outline: {} top-level entries", outline.len());
+    for chapter in outline.iter().take(5) {
+        println!("  p.{:>4} {}", chapter.page_number, chapter.title);
+    }
+
     println!(
         "{} characters, {} boxed, rendered {} x {}",
         text.text.chars().count(),

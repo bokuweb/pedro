@@ -365,3 +365,43 @@ fn a_library_reopens_with_what_was_put_in_it() {
         book.file_name
     );
 }
+
+/// A book stored before pedro could read its kind of bookmark has an empty
+/// outline against a document that has one. Opening it is what fixes that, and
+/// the fix has to survive the window being closed.
+#[test]
+fn an_outline_can_be_filled_in_later() {
+    let (store, root) = library("outline");
+    let book = store
+        .add_document(&pdf(&root, "book.pdf", &["a", "b", "c"]))
+        .expect("a readable pdf");
+    assert!(book.outline.is_empty(), "the fixture has no bookmarks");
+
+    let chapters = vec![
+        pedro_pdf::OutlineItem {
+            title: "One".to_owned(),
+            page_number: 1,
+        },
+        pedro_pdf::OutlineItem {
+            title: "Two".to_owned(),
+            page_number: 3,
+        },
+    ];
+    store
+        .set_outline(&book.id, &chapters)
+        .expect("a stored book");
+
+    let reopened = Store::open(&root).expect("an existing library");
+    assert_eq!(
+        reopened.book(&book.id).expect("a query").unwrap().outline,
+        chapters
+    );
+}
+
+#[test]
+fn an_outline_for_a_book_that_is_not_there_says_so() {
+    let (store, _root) = library("outline-missing");
+
+    let error = store.set_outline("nope", &[]).unwrap_err();
+    assert!(matches!(error, StoreError::NoSuchBook(_)), "{error}");
+}

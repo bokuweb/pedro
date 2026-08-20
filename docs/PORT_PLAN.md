@@ -142,18 +142,18 @@ Each step leaves the workspace building and tested.
    becomes a system prompt, a conversation, a stream of tokens, and finally a
    stored answer with resolved citations. Runnable as
    `cargo run -p pedro-core --example ask`.
-7. ⬜ **`pedro-app`** — the screens, in this order: library, reader with real
-   pages, selection and highlights, chat panel with streaming and citations,
-   outline, settings, keyboard navigation (arrows always, Vim/Emacs optional).
+7. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
+   continuous scroll, selection and highlights, chat panel with streaming and
+   citations, contents, settings, and the keys for turning and zooming. Vim and
+   Emacs bindings and two-page spreads are the parts of step 7 still open.
 
-Steps 1–6 have no GPUI dependency and are covered by 143 tests. Step 7 is where
-the existing shell — rail, sidebar, tabs, reader canvas — stops showing
-placeholder data.
+Steps 1–6 have no GPUI dependency. The workspace is covered by 173 tests, all of
+which run without an agent CLI, a network, or a window.
 
-## What the first six steps turned up
+## What building it turned up
 
-Two constraints were found by running the code rather than by reading about it,
-and both shaped the design:
+Four things were found by running the code rather than by reading about it, and
+each shaped the design:
 
 - **pdfium aborts the process when two threads are inside it at once**, with or
   without pdfium-render's `thread_safe` feature. `pedro-pdf` therefore takes a
@@ -164,6 +164,16 @@ and both shaped the design:
   a cancelled question hanging for as long as the run would have taken. The CLI
   is now started in a process group of its own and the group is signalled, which
   took one cancellation test from 30 seconds to 0.1.
+- **A page has two coordinate spaces and pdfium answers in both.** It
+  rasterises the crop box and reports characters in media box coordinates. A
+  printed book is inset from one to the other, so every mark landed a line above
+  its words. Only rendering the page and counting ink inside the box a character
+  claimed could settle it; that check is now a test, and
+  `cargo run -p pedro-pdf --example boxes` is the tool that found it.
+- **Layout state has to be recorded when a frame is painted, not when it is
+  laid out.** A scrolling list lays its rows out in its own space and translates
+  them on the way to the screen, so bounds taken during layout are in neither
+  the space the mouse is reported in nor the space the page is drawn in.
 
 ## Deliberately not ported
 

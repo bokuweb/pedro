@@ -109,6 +109,8 @@ pub struct Entry {
     pub detail: Option<SharedString>,
     /// Whether clicking the entry should open it as a tab.
     pub openable: bool,
+    /// Whether the row offers to remove what it names.
+    pub removable: bool,
 }
 
 impl Entry {
@@ -123,6 +125,7 @@ impl Entry {
             icon: IconName::File,
             detail: None,
             openable: true,
+            removable: false,
         }
     }
 
@@ -158,6 +161,11 @@ impl Entry {
 
     fn read_only(mut self) -> Self {
         self.openable = false;
+        self
+    }
+
+    fn removable(mut self) -> Self {
+        self.removable = true;
         self
     }
 
@@ -287,6 +295,7 @@ impl Panel {
                 )
                 .icon(IconName::Star)
                 .trailing(format!("p. {}", highlight.page_number))
+                .removable()
                 .status(status)
                 .current(open.is_some())
             })
@@ -422,7 +431,8 @@ fn one_line(text: &str) -> String {
 fn row_for(book: &Book) -> Entry {
     let entry = Entry::new(format!("book:{}", book.id), title_of(book))
         .meta(format!("{} pages", book.page_count))
-        .detail(book.file_name.clone());
+        .detail(book.file_name.clone())
+        .removable();
 
     match &book.reading {
         Some(reading) => entry.trailing(format!("p. {}", reading.page)),

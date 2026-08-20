@@ -200,6 +200,24 @@ impl Store {
         Ok(())
     }
 
+    /// Records a book's table of contents.
+    ///
+    /// Books added before pedro could read a particular kind of bookmark have
+    /// an empty outline stored against a document that has one. Reading it
+    /// again when the book is opened is what fixes them, and it has to be
+    /// written down or every question pays for the extraction again.
+    pub fn set_outline(&self, book_id: &str, outline: &[OutlineItem]) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE books SET outline = ?1 WHERE id = ?2",
+            params![write_outline(outline), book_id],
+        )?;
+
+        match changed {
+            0 => Err(StoreError::NoSuchBook(book_id.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
     /// Saves where the reader is. Panel states left as `None` keep whatever
     /// was stored, so saving a page does not fold away an opened panel.
     pub fn save_reading_state(

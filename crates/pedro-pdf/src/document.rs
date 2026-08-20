@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use pdfium_render::prelude::{
-    PdfBitmapFormat, PdfDocument, PdfPage, PdfPageRenderRotation, PdfRect,
+    PdfBitmapFormat, PdfBookmark, PdfDocument, PdfPage, PdfPageIndex, PdfPageRenderRotation,
+    PdfRect,
 };
 
 use crate::PdfError;
@@ -246,9 +247,7 @@ impl Document {
 
         while let Some(bookmark) = current {
             if let Some(title) = bookmark.title()
-                && let Some(page_index) = bookmark
-                    .destination()
-                    .and_then(|destination| destination.page_index().ok())
+                && let Some(page_index) = page_of(&bookmark)
             {
                 let title = title.trim().to_owned();
                 if !title.is_empty() {
@@ -284,6 +283,29 @@ impl Document {
                 page_count: self.count(),
             })
     }
+}
+
+/// The page a bookmark points at.
+///
+/// A bookmark names its destination directly or through a `GoTo` action, and
+/// which of the two a book uses is a matter of who wrote it. Reading only the
+/// first leaves a book with a full table of contents looking as though it has
+/// none — and a book with no outline sends a page window with every question
+/// instead of the chapter the question is about.
+fn page_of(bookmark: &PdfBookmark<'_>) -> Option<PdfPageIndex> {
+    let direct = bookmark
+        .destination()
+        .and_then(|destination| destination.page_index().ok());
+
+    direct.or_else(|| {
+        bookmark
+            .action()?
+            .as_local_destination_action()?
+            .destination()
+            .ok()?
+            .page_index()
+            .ok()
+    })
 }
 
 /// The box a page is rendered into, in the coordinate space its characters are
