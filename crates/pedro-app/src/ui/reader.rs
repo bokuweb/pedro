@@ -5,12 +5,17 @@
 //! first page rasterised in the background — the same sheet is drawn empty,
 //! which keeps the layout from jumping when the page lands in it.
 
+use std::sync::Arc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, img, px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, canvas, div, img, px,
+    relative,
 };
 use gpui_component::{IconName, h_flex, v_flex};
+
+use pedro_pdf::Rect;
 
 use crate::app::{PAGE_HEIGHT, Pedro};
 use crate::palette;
@@ -28,11 +33,13 @@ impl Pedro {
         }
 
         let Some(open) = &tab.document else {
-            return render_sheet(PAGE_HEIGHT * 0.75, None).into_any_element();
+            return render_sheet(PAGE_HEIGHT * 0.75, None, Vec::new()).into_any_element();
         };
 
         let width = open.width_at(PAGE_HEIGHT);
         let spread = matches!(self.layout, PageLayout::Spread) && open.page_count > 1;
+        let page =
+            render_sheet(width, open.visible().cloned(), open.selection_rects()).into_any_element();
 
         v_flex()
             .size_full()
@@ -42,14 +49,50 @@ impl Pedro {
             .child(
                 h_flex()
                     .gap(px(18.))
-                    .child(render_sheet(width, open.visible().cloned()))
+                    .child(self.selectable(page, cx))
                     // The facing page is drawn as an empty sheet until spreads
                     // rasterise two pages rather than one: an empty sheet is at
                     // least honest about the shape of what is coming.
-                    .when(spread, |this| this.child(render_sheet(width, None))),
+                    .when(spread, |this| {
+                        this.child(render_sheet(width, None, Vec::new()))
+                    }),
             )
             .child(self.render_page_controls(open.page, open.page_count, cx))
             .into_any_element()
+    }
+
+    /// Makes a page answer a drag with a passage.
+    ///
+    /// The page also reports where it was drawn, because a drag arrives in
+    /// window coordinates and the characters are known as fractions of the
+    /// page; a `canvas` is the only element that is told its own bounds.
+    fn selectable(&self, page: AnyElement, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.entity();
+
+        div()
+            .id("page")
+            .relative()
+            .cursor_text()
+            .child(page)
+            .child(canvas(
+                move |bounds, _, cx| {
+                    this.update(cx, |this, _| this.page_drawn_at(bounds));
+                },
+                |_, _, _, _| {},
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.begin_selection(event.position, cx)
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                this.extend_selection(event.position, cx)
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_selection(cx)),
+            )
     }
 
     /// Where the reader is, and the two ways to move.
@@ -85,9 +128,15 @@ impl Pedro {
     }
 }
 
-/// One sheet of paper, with a page on it or without.
-fn render_sheet(width: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) -> impl IntoElement {
+/// One sheet of paper, with a page on it or without, and whatever of it the
+/// reader has marked.
+fn render_sheet(
+    width: f32,
+    image: Option<Arc<RenderImage>>,
+    selection: Vec<Rect>,
+) -> impl IntoElement {
     div()
+        .relative()
         .w(px(width))
         .h(px(PAGE_HEIGHT))
         .rounded(px(3.))
@@ -95,6 +144,23 @@ fn render_sheet(width: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) ->
         .shadow_lg()
         .overflow_hidden()
         .children(image.map(|image| img(image).w(px(width)).h(px(PAGE_HEIGHT))))
+        .children(selection.into_iter().map(render_marked))
+}
+
+/// One line of the selection, drawn over the page.
+///
+/// Placed in fractions of the sheet rather than in pixels, which is the same
+/// space the character boxes are measured in — so the mark stays on the words
+/// at any size the page is drawn.
+fn render_marked(rect: Rect) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(relative(rect.left))
+        .top(relative(rect.top))
+        .w(relative(rect.width().max(0.0)))
+        .h(relative(rect.height().max(0.0)))
+        .rounded(px(2.))
+        .bg(palette::accent().opacity(0.34))
 }
 
 fn render_step(

@@ -24,6 +24,26 @@ use crate::palette;
 use crate::state::AgentStatus;
 use crate::ui::icon;
 
+/// How much of a marked passage to show above the field. Long enough to
+/// recognise the sentence, short enough that the page stays the thing being
+/// read.
+const QUOTE_LENGTH: usize = 220;
+
+/// `text`, cut to `limit` characters on a word boundary where there is one.
+fn shorten(text: &str, limit: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= limit {
+        return text;
+    }
+
+    let kept: String = text.chars().take(limit).collect();
+    let kept = kept
+        .rsplit_once(' ')
+        .map_or(kept.as_str(), |(head, _)| head);
+
+    format!("{kept}…")
+}
+
 impl Pedro {
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         v_flex()
@@ -32,8 +52,41 @@ impl Pedro {
             .pb(px(10.))
             .pt(px(6.))
             .gap(px(7.))
+            .children(self.render_quoted_passage())
             .child(self.render_ask_field(cx))
             .child(self.render_context_line())
+    }
+
+    /// The passage the question will be asked about.
+    ///
+    /// chatbook sends the selected text with the question so that "what does
+    /// this mean?" is a complete sentence. Showing it here is what makes that
+    /// legible: the reader can see exactly what the agent is being handed.
+    fn render_quoted_passage(&self) -> Option<impl IntoElement + use<>> {
+        let passage = self.selected_text()?;
+        let quote = shorten(&passage, QUOTE_LENGTH);
+
+        Some(
+            h_flex()
+                .w_full()
+                .px(px(12.))
+                .py(px(8.))
+                .gap(px(10.))
+                .items_start()
+                .rounded(px(12.))
+                .bg(palette::row_active())
+                .border_l_2()
+                .border_color(palette::accent())
+                .child(icon(IconName::Star, px(13.), palette::code()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(palette::text_muted())
+                        .child(quote),
+                ),
+        )
     }
 
     fn render_ask_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -200,5 +253,41 @@ impl Pedro {
                             .child(self.layout.label()),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_passage_is_left_alone() {
+        assert_eq!(shorten("a short passage", 220), "a short passage");
+    }
+
+    /// A passage picked off a page arrives with the line breaks the page put in
+    /// it, which are not part of the sentence.
+    #[test]
+    fn the_page_layout_is_squeezed_out_of_the_quote() {
+        assert_eq!(shorten("two\nlines   here", 220), "two lines here");
+    }
+
+    #[test]
+    fn a_long_passage_is_cut_at_a_word() {
+        let cut = shorten("alpha beta gamma delta", 14);
+        assert_eq!(cut, "alpha beta…");
+    }
+
+    /// Japanese does not put spaces between words, so there is no boundary to
+    /// cut at and the limit has to be enough on its own.
+    #[test]
+    fn a_passage_with_no_spaces_is_cut_at_the_limit() {
+        let cut = shorten("エッジで動きます", 4);
+        assert_eq!(cut, "エッジで…");
+    }
+
+    #[test]
+    fn cutting_counts_characters_not_bytes() {
+        assert_eq!(shorten("あいうえお", 5), "あいうえお");
     }
 }

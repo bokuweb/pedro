@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Window,
-    actions, div, px,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, SharedString,
+    Styled as _, Window, actions, div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
@@ -47,6 +47,11 @@ pub struct Pedro {
     pub(crate) layout: PageLayout,
     pub(crate) agent_status: AgentStatus,
     pub(crate) library: Library,
+    /// Where the page is on screen, recorded while it is drawn. A drag arrives
+    /// in window coordinates and the page needs it as a fraction of itself.
+    pub(crate) page_bounds: Option<Bounds<Pixels>>,
+    /// Whether the pointer is down on the page, dragging out a passage.
+    pub(crate) selecting: bool,
     /// The last thing that went wrong where the reader was looking. Shown in
     /// the sidebar rather than as a notification: a file that could not be
     /// added is about the list it is missing from.
@@ -91,6 +96,8 @@ impl Pedro {
             layout: PageLayout::Single,
             agent_status,
             library,
+            page_bounds: None,
+            selecting: false,
             notice: None,
             window_drag_armed: false,
         }
@@ -386,9 +393,18 @@ impl Pedro {
             let rendered = cx
                 .background_executor()
                 .spawn(async move {
-                    document
+                    // The pixels and the text of a page are wanted at the same
+                    // moment and cost one trip into pdfium each, so they are
+                    // fetched together rather than as two round trips through
+                    // the UI thread.
+                    let image = document
                         .render_page(page - 1, scale)
-                        .map_err(|err| err.to_string())
+                        .map_err(|err| err.to_string())?;
+                    let text = document
+                        .page_text(page - 1)
+                        .map_err(|err| err.to_string())?;
+
+                    Ok::<_, String>((image, text))
                 })
                 .await;
 
@@ -404,7 +420,7 @@ impl Pedro {
         &mut self,
         tab_id: &str,
         page: u32,
-        rendered: Result<pedro_pdf::PageImage, String>,
+        rendered: Result<(pedro_pdf::PageImage, pedro_pdf::PageText), String>,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
@@ -415,7 +431,8 @@ impl Pedro {
         };
 
         match rendered {
-            Ok(image) => {
+            Ok((image, text)) => {
+                open.text = Some(text);
                 open.rendered =
                     as_render_image(image).map(|image| crate::document::Rendered { page, image });
             }
@@ -426,6 +443,77 @@ impl Pedro {
         }
 
         cx.notify();
+    }
+
+    /// Records where the page is being drawn, so a drag can be read against it.
+    ///
+    /// Called while the page is laid out, which is the only place the answer is
+    /// known — and only stored when it changes, since storing it every frame
+    /// would ask for another frame every frame.
+    pub(crate) fn page_drawn_at(&mut self, bounds: Bounds<Pixels>) {
+        if self.page_bounds != Some(bounds) {
+            self.page_bounds = Some(bounds);
+        }
+    }
+
+    /// Where a window-space point falls on the page, as fractions of it.
+    fn on_the_page(&self, position: Point<Pixels>) -> Option<(f32, f32)> {
+        let bounds = self.page_bounds?;
+        let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+
+        Some((
+            (f32::from(position.x) - f32::from(bounds.origin.x)) / width,
+            (f32::from(position.y) - f32::from(bounds.origin.y)) / height,
+        ))
+    }
+
+    fn document_mut(&mut self) -> Option<&mut OpenDocument> {
+        self.active_tab
+            .and_then(|index| self.tabs.get_mut(index))
+            .and_then(|tab| tab.document.as_mut())
+    }
+
+    pub(crate) fn begin_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((x, y)) = self.on_the_page(position) else {
+            return;
+        };
+        let Some(open) = self.document_mut() else {
+            return;
+        };
+
+        open.begin_selection(x, y);
+        self.selecting = true;
+        cx.notify();
+    }
+
+    pub(crate) fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        let Some((x, y)) = self.on_the_page(position) else {
+            return;
+        };
+        let Some(open) = self.document_mut() else {
+            return;
+        };
+
+        open.extend_selection(x, y);
+        cx.notify();
+    }
+
+    pub(crate) fn finish_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selecting {
+            self.selecting = false;
+            cx.notify();
+        }
+    }
+
+    /// The passage a question would quote, if the reader has marked one.
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        self.open_document()?.selected_text()
     }
 
     /// Moves `by` pages and draws what that lands on.
@@ -548,6 +636,12 @@ impl Render for Pedro {
                         v_flex()
                             .flex_1()
                             .min_w_0()
+                            // `h_flex` centres its children on the cross axis,
+                            // so a column without a height of its own floats in
+                            // the middle of the window at the height of
+                            // whatever is inside it.
+                            .h_full()
+                            .min_h_0()
                             // The only place the canvas is painted: the reader
                             // and the composer sit on it rather than each
                             // laying down another film of their own.

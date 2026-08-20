@@ -108,6 +108,25 @@ impl PageText {
             .map(|char_box| char_box.index)
     }
 
+    /// The character nearest `(x, y)`, for a drag that has wandered off the
+    /// text — into a margin, between two lines, past the last word of a line.
+    ///
+    /// Distance is measured to the middle of each box, with the vertical
+    /// distance weighted twice: a pointer below the end of one line is asking
+    /// for that line, not for whatever happens to sit directly beneath it.
+    pub fn char_near(&self, x: f32, y: f32) -> Option<usize> {
+        if let Some(index) = self.char_at(x, y) {
+            return Some(index);
+        }
+
+        self.chars
+            .iter()
+            .min_by(|left, right| {
+                distance(&left.rect, x, y).total_cmp(&distance(&right.rect, x, y))
+            })
+            .map(|char_box| char_box.index)
+    }
+
     /// The boxes of the characters from `from` to `to`, merged per line, which
     /// is what a highlight is drawn from.
     ///
@@ -134,6 +153,17 @@ impl PageText {
 
         lines
     }
+}
+
+/// How far `(x, y)` is from the middle of `rect`, with vertical distance
+/// weighted so that lines win over columns.
+fn distance(rect: &Rect, x: f32, y: f32) -> f32 {
+    const LINES_OVER_COLUMNS: f32 = 2.0;
+
+    let dx = (rect.left + rect.right) / 2.0 - x;
+    let dy = ((rect.top + rect.bottom) / 2.0 - y) * LINES_OVER_COLUMNS;
+
+    dx * dx + dy * dy
 }
 
 fn on_the_same_line(line: &Rect, centre: f32) -> bool {
@@ -198,6 +228,31 @@ mod tests {
         let page = page("ab", vec![char_box(0, 0.1, 0.1)]);
         assert_eq!(page.char_at(0.9, 0.9), None);
         assert_eq!(page.char_at(0.105, 0.105), Some(0));
+    }
+
+    #[test]
+    fn a_point_off_the_text_finds_the_nearest_character() {
+        let page = page("ab", vec![char_box(0, 0.1, 0.1), char_box(1, 0.5, 0.1)]);
+
+        // Past the end of the line, in the right margin.
+        assert_eq!(page.char_near(0.9, 0.11), Some(1));
+        // In the left margin.
+        assert_eq!(page.char_near(0.0, 0.11), Some(0));
+    }
+
+    /// A point below one line and above another belongs to the line it is
+    /// closer to, not to whatever column it happens to sit over.
+    #[test]
+    fn a_point_between_lines_picks_the_nearer_line() {
+        let page = page("ab", vec![char_box(0, 0.5, 0.10), char_box(1, 0.1, 0.30)]);
+
+        assert_eq!(page.char_near(0.3, 0.14), Some(0));
+        assert_eq!(page.char_near(0.3, 0.29), Some(1));
+    }
+
+    #[test]
+    fn a_page_without_characters_has_nothing_near_anything() {
+        assert_eq!(page("", vec![]).char_near(0.5, 0.5), None);
     }
 
     #[test]

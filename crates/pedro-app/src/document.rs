@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui::{RenderImage, SharedString};
 use image::{Frame, RgbaImage};
-use pedro_pdf::{Document, PageImage, PageSize, PixelFormat};
+use pedro_pdf::{Document, PageImage, PageSize, PageText, PixelFormat, Rect};
 
 /// How much detail to render per logical pixel.
 ///
@@ -30,6 +30,21 @@ pub struct OpenDocument {
     /// One-based, the way the reader counts.
     pub page: u32,
     pub rendered: Option<Rendered>,
+    /// The text of the page on screen, with the box around every character.
+    /// What turns a drag across the page into a passage.
+    pub text: Option<PageText>,
+    pub selection: Option<Selection>,
+}
+
+/// A run of characters the reader has dragged across.
+///
+/// Stored as indices rather than as the text itself so that the highlight and
+/// the quotation cannot disagree: both are read back out of the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub page: u32,
+    pub from: usize,
+    pub to: usize,
 }
 
 /// A page that has been rasterised and is ready to draw.
@@ -48,6 +63,8 @@ impl OpenDocument {
             size,
             page: page.clamp(1, page_count.max(1)),
             rendered: None,
+            text: None,
+            selection: None,
         }
     }
 
@@ -85,6 +102,67 @@ impl OpenDocument {
     /// What the tab bar and the composer's context line say about where we are.
     pub fn position(&self) -> SharedString {
         format!("p. {} of {}", self.page, self.page_count).into()
+    }
+
+    /// The text of the page under the pointer, once it has been extracted.
+    ///
+    /// `None` while a page is still being read, which is what makes a drag on a
+    /// page that has not finished loading do nothing rather than select the
+    /// wrong thing.
+    fn page_text(&self) -> Option<&PageText> {
+        self.text.as_ref()
+    }
+
+    /// Starts a selection at the character nearest `(x, y)`, in page fractions.
+    pub fn begin_selection(&mut self, x: f32, y: f32) {
+        let page = self.page;
+        let Some(index) = self.page_text().and_then(|text| text.char_near(x, y)) else {
+            self.selection = None;
+            return;
+        };
+
+        self.selection = Some(Selection {
+            page,
+            from: index,
+            to: index,
+        });
+    }
+
+    /// Drags the far end of the selection to `(x, y)`.
+    pub fn extend_selection(&mut self, x: f32, y: f32) {
+        let Some(index) = self.page_text().and_then(|text| text.char_near(x, y)) else {
+            return;
+        };
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+
+        selection.to = index;
+    }
+
+    /// The selection, if it is on the page being shown and covers anything.
+    ///
+    /// A selection of one character is a click, not a passage: dropping it is
+    /// what makes clicking the page clear the last highlight.
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+            .filter(|selection| selection.page == self.page && selection.from != selection.to)
+    }
+
+    /// The passage the reader has selected.
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection()?;
+        let text = self.page_text()?.slice(selection.from, selection.to);
+
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// One rectangle per line of the selection, to draw over the page.
+    pub fn selection_rects(&self) -> Vec<Rect> {
+        match (self.selection(), self.page_text()) {
+            (Some(selection), Some(text)) => text.line_rects(selection.from, selection.to),
+            _ => Vec::new(),
+        }
     }
 }
 
