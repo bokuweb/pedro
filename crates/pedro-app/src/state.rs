@@ -1,45 +1,44 @@
-//! View state for the shell: what the rail can switch to, what each panel
-//! lists, and which documents are open.
+//! What the sidebar can switch to, what each panel lists, and which documents
+//! are open.
 //!
-//! The library contents are placeholder data for now. Once the document store
-//! lands, [`Panel::library`] is the only thing that has to change.
+//! Panels are built when they are drawn rather than kept and invalidated. Their
+//! contents follow the open book and the page it is on, and a cache of that has
+//! to be swept on every event that moves either — which is every event.
 
 use gpui::SharedString;
 use gpui_component::IconName;
 use pedro_agent::DiscoveredAgent;
-use pedro_core::model::Book;
+use pedro_core::model::{Book, Highlight};
+use pedro_pdf::OutlineItem;
 
+use crate::chat::Conversation;
 use crate::document::OpenDocument;
 use crate::library::{Library, how_long_ago, title_of};
 
-/// A destination in the icon rail on the far left.
+/// A place the sidebar can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RailItem {
     Library,
     Reader,
-    Chat,
     Highlights,
     Agents,
     Settings,
 }
 
 impl RailItem {
-    /// Destinations in the upper group of the rail.
-    pub const PRIMARY: [RailItem; 4] = [
-        RailItem::Library,
-        RailItem::Reader,
-        RailItem::Chat,
-        RailItem::Highlights,
-    ];
+    /// The places a reader goes.
+    ///
+    /// There is no separate list of conversations: every conversation hangs off
+    /// the passage that started it, so the highlights *are* that list.
+    pub const PRIMARY: [RailItem; 3] = [RailItem::Library, RailItem::Reader, RailItem::Highlights];
 
-    /// Destinations pinned to the bottom of the rail.
+    /// The places that are settings rather than reading.
     pub const SECONDARY: [RailItem; 2] = [RailItem::Agents, RailItem::Settings];
 
     pub fn icon(self) -> IconName {
         match self {
             RailItem::Library => IconName::GalleryVerticalEnd,
             RailItem::Reader => IconName::BookOpen,
-            RailItem::Chat => IconName::Bot,
             RailItem::Highlights => IconName::Star,
             RailItem::Agents => IconName::SquareTerminal,
             RailItem::Settings => IconName::Settings,
@@ -51,7 +50,6 @@ impl RailItem {
         match self {
             RailItem::Library => "Library",
             RailItem::Reader => "Contents",
-            RailItem::Chat => "Conversations",
             RailItem::Highlights => "Highlights",
             RailItem::Agents => "Agents",
             RailItem::Settings => "Settings",
@@ -63,15 +61,10 @@ impl RailItem {
         match self {
             RailItem::Library => "Documents you have added to pedro.",
             RailItem::Reader => "Table of contents for the active document.",
-            RailItem::Chat => "Questions you have asked about your documents.",
-            RailItem::Highlights => "Passages you have marked while reading.",
+            RailItem::Highlights => "Passages you have marked, and what you asked about them.",
             RailItem::Agents => "Coding agent CLIs discovered on this machine.",
             RailItem::Settings => "Application preferences.",
         }
-    }
-
-    pub fn all() -> impl Iterator<Item = RailItem> {
-        Self::PRIMARY.into_iter().chain(Self::SECONDARY)
     }
 }
 
@@ -79,15 +72,13 @@ impl RailItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Working,
-    Done,
     Failed,
 }
 
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
-            Status::Working => "Working",
-            Status::Done => "Done",
+            Status::Working => "Answering",
             Status::Failed => "Failed",
         }
     }
@@ -110,6 +101,9 @@ pub struct Entry {
     pub trailing: Option<SharedString>,
     /// Replaces `trailing` when the entry is busy or finished.
     pub status: Option<Status>,
+    /// Whether this is the row the reader is on — the chapter holding the open
+    /// page, say. Drawn like a selected row, because that is what it is.
+    pub current: bool,
     pub icon: IconName,
     /// The faint line below the title, beside the icon.
     pub detail: Option<SharedString>,
@@ -125,6 +119,7 @@ impl Entry {
             meta: None,
             trailing: None,
             status: None,
+            current: false,
             icon: IconName::File,
             detail: None,
             openable: true,
@@ -146,8 +141,13 @@ impl Entry {
         self
     }
 
-    fn status(mut self, status: Status) -> Self {
-        self.status = Some(status);
+    fn status(mut self, status: Option<Status>) -> Self {
+        self.status = status;
+        self
+    }
+
+    fn current(mut self, current: bool) -> Self {
+        self.current = current;
         self
     }
 
@@ -168,10 +168,12 @@ impl Entry {
 }
 
 /// A collapsible group of entries.
+///
+/// Whether it is open is not stored here: panels are rebuilt on every frame,
+/// and state that survives has to live somewhere that is not.
 #[derive(Clone)]
 pub struct Section {
     pub title: SharedString,
-    pub expanded: bool,
     pub entries: Vec<Entry>,
 }
 
@@ -179,7 +181,6 @@ impl Section {
     fn new(title: impl Into<SharedString>, entries: Vec<Entry>) -> Self {
         Self {
             title: title.into(),
-            expanded: true,
             entries,
         }
     }
@@ -234,65 +235,66 @@ impl Panel {
         Self::new(sections, library.empty_message())
     }
 
-    fn reader() -> Self {
+    /// The book's own table of contents, as pdfium read it.
+    fn reader(outline: &[OutlineItem], page: u32) -> Self {
+        // The chapter being read is the last one that starts at or before this
+        // page, which is the same rule the excerpt is cut by.
+        let current = outline
+            .iter()
+            .rposition(|chapter| chapter.page_number <= page);
+
+        let entries = outline
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| {
+                Entry::new(
+                    format!("page:{}", chapter.page_number),
+                    chapter.title.clone(),
+                )
+                .icon(IconName::Dash)
+                .trailing(format!("p. {}", chapter.page_number))
+                .current(current == Some(index))
+            })
+            .collect();
+
         Self::new(
-            vec![Section::new(
-                "Chapters",
-                vec![
-                    Entry::new("toc:1", "1. Introduction").detail("p. 1"),
-                    Entry::new("toc:2", "2. The Link Layer").detail("p. 21"),
-                    Entry::new("toc:3", "3. The Internet Protocol").detail("p. 63"),
-                ],
-            )],
-            "Open a document to see its contents.",
+            vec![Section::new("Chapters", entries)],
+            "This book has no table of contents.",
         )
     }
 
-    fn chat() -> Self {
-        Self::new(
-            vec![Section::new(
-                "Recent",
-                vec![
-                    Entry::new("chat:1", "Why is the window scaled?")
-                        .icon(IconName::Bot)
-                        .meta("TCP/IP Illustrated")
-                        .trailing("12m")
-                        .detail("p. 267"),
-                    Entry::new("chat:2", "Explain slow start")
-                        .icon(IconName::Bot)
-                        .meta("TCP/IP Illustrated")
-                        .status(Status::Working)
-                        .detail("p. 289"),
-                    Entry::new("chat:3", "What is a silly window?")
-                        .icon(IconName::Bot)
-                        .meta("TCP/IP Illustrated")
-                        .status(Status::Done)
-                        .detail("p. 271"),
-                    Entry::new("chat:4", "Why is this checksum optional?")
-                        .icon(IconName::Bot)
-                        .meta("Crafting Interpreters")
-                        .status(Status::Failed)
-                        .detail("p. 88"),
-                ],
-            )],
-            "Select a passage while reading to ask about it.",
-        )
-    }
+    /// The passages marked in the open book, newest first.
+    ///
+    /// Each one is also a conversation: pressing it opens the page and whatever
+    /// was asked about that passage.
+    fn highlights(highlights: &[Highlight], chat: Option<&Conversation>) -> Self {
+        let entries = highlights
+            .iter()
+            .rev()
+            .map(|highlight| {
+                // The one being answered right now says so, since the answer
+                // lands in a panel the reader may not be looking at.
+                let open = chat.filter(|chat| chat.highlight_id.as_deref() == Some(&highlight.id));
+                let status = open.and_then(|chat| match (chat.is_answering(), &chat.error) {
+                    (true, _) => Some(Status::Working),
+                    (_, Some(_)) => Some(Status::Failed),
+                    _ => None,
+                });
 
-    fn highlights() -> Self {
+                Entry::new(
+                    format!("highlight:{}", highlight.id),
+                    one_line(&highlight.selected_text),
+                )
+                .icon(IconName::Star)
+                .trailing(format!("p. {}", highlight.page_number))
+                .status(status)
+                .current(open.is_some())
+            })
+            .collect();
+
         Self::new(
-            vec![Section::new(
-                "TCP/IP Illustrated",
-                vec![
-                    Entry::new("hl:1", "Nagle's algorithm")
-                        .icon(IconName::Star)
-                        .trailing("p. 267"),
-                    Entry::new("hl:2", "Silly window syndrome")
-                        .icon(IconName::Star)
-                        .trailing("p. 271"),
-                ],
-            )],
-            "Nothing highlighted yet.",
+            vec![Section::new("Marked", entries)],
+            "Nothing marked yet. Drag across a page to ask about a passage.",
         )
     }
 
@@ -342,16 +344,32 @@ impl Panel {
         )
     }
 
-    pub fn for_rail_item(item: RailItem, status: &AgentStatus, library: &Library) -> Self {
+    pub fn for_rail_item(item: RailItem, shown: &Shown<'_>) -> Self {
         match item {
-            RailItem::Library => Self::library(library),
-            RailItem::Reader => Self::reader(),
-            RailItem::Chat => Self::chat(),
-            RailItem::Highlights => Self::highlights(),
-            RailItem::Agents => Self::agents(status),
+            RailItem::Library => Self::library(shown.library),
+            RailItem::Reader => Self::reader(shown.outline, shown.page),
+            RailItem::Highlights => Self::highlights(shown.highlights, shown.chat),
+            RailItem::Agents => Self::agents(shown.status),
             RailItem::Settings => Self::settings(),
         }
     }
+}
+
+/// Everything a panel is built from, gathered once per frame.
+pub struct Shown<'a> {
+    pub library: &'a Library,
+    pub status: &'a AgentStatus,
+    pub outline: &'a [OutlineItem],
+    /// The page being read, so the contents can say which chapter that is in.
+    pub page: u32,
+    pub highlights: &'a [Highlight],
+    /// The conversation that is open, so the passage behind it can say so.
+    pub chat: Option<&'a Conversation>,
+}
+
+/// A passage as one line, for a list that has room for one.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One book as a sidebar row: how big it is and when it was last touched,

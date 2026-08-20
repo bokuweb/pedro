@@ -3,7 +3,7 @@
 //! The individual regions live in [`crate::ui`], as `impl Pedro` blocks, so
 //! that this file stays about state transitions rather than styling.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use futures::StreamExt as _;
@@ -24,7 +24,7 @@ use crate::chat::Conversation;
 use crate::document::{OpenDocument, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
-use crate::state::{AgentStatus, Entry, OpenTab, PageLayout, Panel, RailItem};
+use crate::state::{AgentStatus, Entry, OpenTab, PageLayout, Panel, RailItem, Shown};
 
 actions!(pedro, [FocusSearch, NextPage, PreviousPage]);
 
@@ -44,7 +44,9 @@ pub struct Pedro {
     /// rather than per install, so it lives beside the field.
     pub(crate) web_search: bool,
     pub(crate) active_rail: RailItem,
-    pub(crate) panels: HashMap<RailItem, Panel>,
+    /// The sections the reader has shut. Panels are rebuilt every frame, so
+    /// what survives between them lives here.
+    pub(crate) collapsed: HashSet<(RailItem, usize)>,
     pub(crate) tabs: Vec<OpenTab>,
     pub(crate) active_tab: Option<usize>,
     pub(crate) layout: PageLayout,
@@ -85,9 +87,6 @@ impl Pedro {
 
         let agent_status = AgentStatus::Detecting;
         let library = Library::Opening;
-        let panels = RailItem::all()
-            .map(|item| (item, Panel::for_rail_item(item, &agent_status, &library)))
-            .collect();
 
         Self::detect_agents(cx);
         Self::open_library(cx);
@@ -98,7 +97,7 @@ impl Pedro {
             composer,
             web_search: true,
             active_rail: RailItem::Library,
-            panels,
+            collapsed: HashSet::new(),
             tabs: Vec::new(),
             active_tab: None,
             layout: PageLayout::Single,
@@ -129,8 +128,6 @@ impl Pedro {
 
     fn agents_detected(&mut self, agents: Vec<DiscoveredAgent>, cx: &mut Context<Self>) {
         self.agent_status = AgentStatus::Done(agents);
-        self.panels
-            .insert(RailItem::Agents, Panel::agents(&self.agent_status));
         cx.notify();
     }
 
@@ -176,7 +173,7 @@ impl Pedro {
             }
         };
 
-        self.refresh_library_panel(cx);
+        cx.notify();
     }
 
     /// Asks for PDFs and adds whatever comes back.
@@ -260,19 +257,33 @@ impl Pedro {
             }
         }
 
-        self.refresh_library_panel(cx);
-    }
-
-    fn refresh_library_panel(&mut self, cx: &mut Context<Self>) {
-        self.panels
-            .insert(RailItem::Library, Panel::library(&self.library));
         cx.notify();
     }
 
-    pub(crate) fn panel(&self) -> &Panel {
-        self.panels
-            .get(&self.active_rail)
-            .expect("every rail item has a panel")
+    /// The panel for wherever the reader is, built from what is on screen now.
+    pub(crate) fn panel(&self) -> Panel {
+        let open = self.open_document();
+        let book = self.active_tab().and_then(|tab| {
+            let id = tab.id.strip_prefix("book:")?;
+            self.library.books().iter().find(|book| book.id == id)
+        });
+
+        Panel::for_rail_item(
+            self.active_rail,
+            &Shown {
+                library: &self.library,
+                status: &self.agent_status,
+                outline: book.map(|book| book.outline.as_slice()).unwrap_or(&[]),
+                page: open.map_or(1, |open| open.page),
+                highlights: open.map(|open| open.highlights.as_slice()).unwrap_or(&[]),
+                chat: self.chat.as_ref(),
+            },
+        )
+    }
+
+    /// Whether a section of the current panel is open.
+    pub(crate) fn is_expanded(&self, index: usize) -> bool {
+        !self.collapsed.contains(&(self.active_rail, index))
     }
 
     pub(crate) fn search_query(&self, cx: &App) -> String {
@@ -287,17 +298,30 @@ impl Pedro {
     }
 
     pub(crate) fn toggle_section(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(panel) = self.panels.get_mut(&self.active_rail)
-            && let Some(section) = panel.sections.get_mut(index)
-        {
-            section.expanded = !section.expanded;
-            cx.notify();
+        let section = (self.active_rail, index);
+        if !self.collapsed.remove(&section) {
+            self.collapsed.insert(section);
         }
+
+        cx.notify();
     }
 
-    /// Opens an entry as a tab, or focuses it when it is already open.
+    /// Acts on a sidebar row: a book opens as a tab, a chapter turns to its
+    /// page, a marked passage reopens the conversation about it.
     pub(crate) fn open_entry(&mut self, entry: &Entry, cx: &mut Context<Self>) {
         if !entry.openable {
+            return;
+        }
+
+        if let Some(page) = entry.id.strip_prefix("page:") {
+            if let Ok(page) = page.parse() {
+                self.show_page(page, cx);
+            }
+            return;
+        }
+
+        if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
+            self.open_marked_passage(&highlight_id.to_owned(), cx);
             return;
         }
 
@@ -604,6 +628,24 @@ impl Pedro {
                 }
             })
             .detach();
+    }
+
+    /// Turns to a marked passage and reopens what was asked about it.
+    fn open_marked_passage(&mut self, highlight_id: &str, cx: &mut Context<Self>) {
+        let Some(highlight) = self
+            .open_document()
+            .and_then(|open| {
+                open.highlights
+                    .iter()
+                    .find(|highlight| highlight.id == highlight_id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+
+        self.show_page(highlight.page_number, cx);
+        self.open_highlight(&highlight, cx);
     }
 
     /// Reopens the conversation behind a marked passage.

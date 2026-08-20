@@ -270,8 +270,8 @@ impl Pedro {
         let mut rendered = Vec::with_capacity(visible.len());
         for (index, section, entries) in visible {
             // While searching, matches are always worth showing even if the
-            // section was collapsed by hand.
-            let expanded = section.expanded || !query.is_empty();
+            // section was shut by hand.
+            let expanded = self.is_expanded(index) || !query.is_empty();
             let header = self.render_section_header(index, section, expanded, cx);
 
             let rows: Vec<_> = if expanded {
@@ -345,7 +345,7 @@ impl Pedro {
     }
 
     fn render_entry(&self, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.active_tab().is_some_and(|tab| tab.id == entry.id);
+        let active = entry.current || self.active_tab().is_some_and(|tab| tab.id == entry.id);
         let clickable = entry.openable;
         let on_open = entry.clone();
 
@@ -552,7 +552,6 @@ fn render_trailing(entry: &Entry) -> impl IntoElement + use<> {
 fn status_color(status: Status) -> Hsla {
     match status {
         Status::Working => palette::working(),
-        Status::Done => palette::success(),
         Status::Failed => palette::danger(),
     }
 }
