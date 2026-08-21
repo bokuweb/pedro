@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &store,
         agent,
         &Question {
-            highlight_id: highlight.id.clone(),
+            highlight_ids: vec![highlight.id.clone()],
             text: question,
             web_search: false,
         },

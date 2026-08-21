@@ -32,6 +32,29 @@ pub struct Excerpt {
     pub is_partial: bool,
 }
 
+/// Cuts the parts of the book worth sending with a question about several
+/// passages at once.
+///
+/// One excerpt per chapter the passages fall in, in page order, without
+/// repeats: two passages from the same chapter are one piece of context, and
+/// sending it twice would pay for it twice and tell the model nothing new.
+pub fn select_excerpts(full_text: &str, pages: &[u32], outline: &[OutlineItem]) -> Vec<Excerpt> {
+    let mut cut: Vec<Excerpt> = Vec::new();
+
+    for page in pages {
+        let excerpt = select_excerpt(full_text, *page, outline);
+        if !cut
+            .iter()
+            .any(|held| held.start_page == excerpt.start_page && held.end_page == excerpt.end_page)
+        {
+            cut.push(excerpt);
+        }
+    }
+
+    cut.sort_by_key(|excerpt| excerpt.start_page);
+    cut
+}
+
 /// Cuts the part of the book worth sending with a question about the page the
 /// highlight sits on: the chapter holding that page when the outline names
 /// one, a [`FALLBACK_WINDOW_PAGES`] window around it otherwise.
@@ -292,6 +315,28 @@ mod tests {
             select_excerpt("切れ目の無い 本文", 3, &outline()),
             excerpt("切れ目の無い 本文", 1, 1, 1)
         );
+    }
+
+    #[test]
+    fn two_passages_in_one_chapter_are_one_excerpt() {
+        let cut = select_excerpts(&book_of(12), &[5, 7], &outline());
+
+        assert_eq!(cut.len(), 1);
+        assert_eq!((cut[0].start_page, cut[0].end_page), (5, 8));
+    }
+
+    #[test]
+    fn passages_in_two_chapters_are_two_excerpts_in_page_order() {
+        let cut = select_excerpts(&book_of(12), &[10, 3], &outline());
+
+        assert_eq!(cut.len(), 2);
+        assert_eq!((cut[0].start_page, cut[0].end_page), (2, 4));
+        assert_eq!((cut[1].start_page, cut[1].end_page), (9, 12));
+    }
+
+    #[test]
+    fn no_passages_is_no_context() {
+        assert!(select_excerpts(&book_of(12), &[], &outline()).is_empty());
     }
 
     #[test]

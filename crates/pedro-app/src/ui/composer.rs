@@ -71,49 +71,59 @@ impl Pedro {
             .bg(palette::surface())
             .border_1()
             .border_color(palette::border())
-            .children(self.render_passage_chip(cx))
+            .children(self.render_passage_chips(cx))
             .child(self.render_ask_row(cx))
     }
 
-    /// The marked passage, attached to the question being written.
-    fn render_passage_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let open = self.open_document()?;
-        let selection = open.selection()?;
-        let passage = open.selected_text()?;
+    /// The passages attached to the question being written.
+    fn render_passage_chips(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.attached.is_empty() {
+            return None;
+        }
 
-        Some(
-            h_flex().child(
-                h_flex()
-                    .id("passage-chip")
-                    .max_w(relative(1.0))
-                    .px(px(8.))
-                    .py(px(3.))
-                    .gap(px(6.))
-                    .items_center()
-                    .rounded(px(8.))
-                    .bg(palette::row_active())
-                    .child(icon(IconName::Star, px(11.), palette::code()))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(palette::text_faint())
-                            .child(format!("p. {}", selection.page)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.))
-                            .text_color(palette::text_muted())
-                            .child(shorten(&passage, CHIP_LENGTH)),
-                    )
-                    .child(icon(IconName::Close, px(11.), palette::text_faint()))
-                    .tooltip(move |window, cx| {
-                        Tooltip::new("Ask about something else").build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.clear_selection(cx))),
-            ),
-        )
+        let chips: Vec<_> = self
+            .attached
+            .iter()
+            .enumerate()
+            .map(|(at, passage)| self.render_passage_chip(at, passage, cx))
+            .collect();
+
+        Some(h_flex().flex_wrap().gap(px(5.)).children(chips))
+    }
+
+    fn render_passage_chip(
+        &self,
+        at: usize,
+        passage: &pedro_core::model::NewHighlight,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        h_flex()
+            .id(("passage-chip", at))
+            .max_w(relative(1.0))
+            .px(px(8.))
+            .py(px(3.))
+            .gap(px(6.))
+            .items_center()
+            .rounded(px(8.))
+            .bg(palette::row_active())
+            .child(icon(IconName::Star, px(11.), palette::code()))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(palette::text_faint())
+                    .child(format!("p. {}", passage.page_number)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(palette::text_muted())
+                    .child(shorten(&passage.selected_text, CHIP_LENGTH)),
+            )
+            .child(icon(IconName::Close, px(11.), palette::text_faint()))
+            .tooltip(move |window, cx| Tooltip::new("Put this passage down").build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| this.detach_passage(at, cx)))
     }
 
     fn render_ask_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

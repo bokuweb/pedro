@@ -100,7 +100,7 @@ fn written(cli: &Path, name: &str) -> String {
 
 fn question(highlight: &Highlight, text: &str) -> Question {
     Question {
-        highlight_id: highlight.id.clone(),
+        highlight_ids: vec![highlight.id.clone()],
         text: text.to_owned(),
         web_search: false,
     }
@@ -286,7 +286,7 @@ fn a_question_about_a_highlight_that_is_not_there_says_so() {
         &store,
         &agent(PathBuf::from("/nonexistent/pedro/claude")),
         &Question {
-            highlight_id: "nope".to_owned(),
+            highlight_ids: vec!["nope".to_owned()],
             text: "これは?".to_owned(),
             web_search: false,
         },
@@ -303,4 +303,56 @@ fn a_question_about_a_highlight_that_is_not_there_says_so() {
 fn the_stand_in_is_written_where_it_is_run_from() {
     let cli = answering("chat-path", "ok");
     assert!(Path::new(&cli).is_file());
+}
+
+/// A question can be about more than one passage, and what the agent is given
+/// has to hold all of them and the context around each.
+#[test]
+fn a_question_can_be_about_two_passages_at_once() {
+    let pages: Vec<String> = (1..=40).map(|page| format!("page{page}")).collect();
+    let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let (store, first) = reading("two-passages", &pages, "page5", 5);
+
+    let book_id = first.book_id.clone();
+    let second = store
+        .add_highlight(
+            &book_id,
+            NewHighlight {
+                selected_text: "page30".to_owned(),
+                page_number: 30,
+                rects: Vec::new(),
+            },
+        )
+        .expect("a stored book");
+
+    let recorder = recording("chat-two-passages");
+    let mut streamed = Vec::new();
+    ask(
+        &store,
+        &agent(recorder.clone()),
+        &Question {
+            highlight_ids: vec![first.id.clone(), second.id.clone()],
+            text: "どう違う?".to_owned(),
+            web_search: false,
+        },
+        &Cancellation::new(),
+        &mut |delta| streamed.push(delta.to_owned()),
+    )
+    .expect("an answering agent");
+
+    let sent = written(&recorder, "command.txt");
+
+    // Both passages, numbered so an answer can say which one it means.
+    assert!(sent.contains("HIGHLIGHTED PASSAGE 1 (page 5)"), "{sent}");
+    assert!(sent.contains("HIGHLIGHTED PASSAGE 2 (page 30)"), "{sent}");
+
+    // And the pages around each of them, which are two windows rather than
+    // everything between the two.
+    assert!(sent.contains("page5") && sent.contains("page30"));
+    assert!(!sent.contains("page18"), "the gap between them was sent");
+
+    // The conversation hangs off the first, which is where the reader will
+    // look for it.
+    assert_eq!(store.messages(&first.id).expect("a query").len(), 2);
+    assert!(store.messages(&second.id).expect("a query").is_empty());
 }

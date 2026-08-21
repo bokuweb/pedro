@@ -8,7 +8,7 @@
 pub use pedro_agent::{Role, Turn};
 
 use crate::citation::strip_sources;
-use crate::excerpt::Excerpt;
+use crate::excerpt::{Excerpt, PAGE_DELIMITER};
 
 /// The conversation as the agent is given it: the earlier turns, then the new
 /// question.
@@ -29,7 +29,14 @@ pub fn build_conversation(history: &[Turn], question: &str) -> Vec<Turn> {
         .collect()
 }
 
-/// Builds the system prompt for a question about a highlighted passage.
+/// A passage the reader marked, and the page it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passage {
+    pub page: u32,
+    pub text: String,
+}
+
+/// Builds the system prompt for a question about one or more marked passages.
 ///
 /// The document block carries an excerpt rather than the whole book. All the
 /// excerpt-awareness lives in the wording *around* the DOCUMENT markers —
@@ -37,32 +44,37 @@ pub fn build_conversation(history: &[Turn], question: &str) -> Vec<Turn> {
 /// substrings of the stored full text and the citation page lookup keeps
 /// finding them. A whole-book excerpt produces exactly the wording this prompt
 /// always had: a one-page book is never told it is looking at a fragment.
-pub fn build_system_prompt(excerpt: &Excerpt, selected_text: &str, use_web_search: bool) -> String {
-    let Excerpt {
-        text,
-        start_page,
-        end_page,
-        total_pages,
-        is_partial,
-    } = excerpt;
+pub fn build_system_prompt(
+    excerpts: &[Excerpt],
+    passages: &[Passage],
+    use_web_search: bool,
+) -> String {
+    let total_pages = excerpts.first().map_or(1, |excerpt| excerpt.total_pages);
+    let is_partial = excerpts.iter().any(|excerpt| excerpt.is_partial);
+    let shown = pages_shown(excerpts);
+    let text = excerpts
+        .iter()
+        .map(|excerpt| excerpt.text.as_str())
+        .collect::<Vec<_>>()
+        .join(&PAGE_DELIMITER.to_string());
 
-    let context_name = if *is_partial {
-        format!("excerpt (pages {start_page}-{end_page} of the {total_pages}-page document)")
+    let context_name = if is_partial {
+        format!("excerpt ({shown} of the {total_pages}-page document)")
     } else {
         "document".to_owned()
     };
 
     // "the shown pages do" / "the document does": the subject and its verb
     // travel together so the two variants stay grammatical in every slot.
-    let scope_does = if *is_partial {
+    let scope_does = if is_partial {
         "the shown pages do"
     } else {
         "the document does"
     };
 
-    let missing_answer_instruction = if *is_partial {
+    let missing_answer_instruction = if is_partial {
         format!(
-            "- You are shown only pages {start_page}-{end_page}; the rest of the document is not \
+            "- You are shown only {shown}; the rest of the document is not \
              visible to you. When the shown pages do not contain the answer, say it is not in the \
              shown pages rather than not in the document, then provide what you know."
         )
@@ -72,7 +84,8 @@ pub fn build_system_prompt(excerpt: &Excerpt, selected_text: &str, use_web_searc
             .to_owned()
     };
 
-    let excerpt_or_document = if *is_partial { "excerpt" } else { "document" };
+    let excerpt_or_document = if is_partial { "excerpt" } else { "document" };
+    let marked = mark_up(passages);
     let web_search_instruction = if use_web_search {
         format!(
             "\n\nWhen {scope_does} not contain enough information to answer the question, you may \
@@ -97,10 +110,7 @@ Use the following {context_name} as your primary context:
 {text}
 --- DOCUMENT END ---
 
-The user has highlighted this specific passage and is asking about it:
---- HIGHLIGHTED PASSAGE ---
-{selected_text}
---- END HIGHLIGHTED PASSAGE ---
+{marked}
 
 Instructions:
 - Answer questions based primarily on the document content.
@@ -128,6 +138,54 @@ Service bindings connect two Workers directly[3].
 [2] 「public、privateはキャッシュを共有キャッシュとして扱ってよいかの指定に使います」
 [3] "you can deploy an authentication service as its own Worker" - Service bindings · Cloudflare Workers docs - https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/"###
     )
+}
+
+/// Which pages the model is looking at, as a phrase that fits both "pages 5-8"
+/// and a question about two chapters at once.
+fn pages_shown(excerpts: &[Excerpt]) -> String {
+    excerpts
+        .iter()
+        .map(|excerpt| match excerpt.start_page == excerpt.end_page {
+            true => format!("page {}", excerpt.start_page),
+            false => format!("pages {}-{}", excerpt.start_page, excerpt.end_page),
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The passages block.
+///
+/// One passage keeps the wording it always had — a question about a sentence
+/// should not read as a question about a list — and several are numbered so
+/// that an answer can say which one it means.
+fn mark_up(passages: &[Passage]) -> String {
+    match passages {
+        [] => String::new(),
+        [only] => format!(
+            "The user has highlighted this specific passage and is asking about it:\n\
+             --- HIGHLIGHTED PASSAGE ---\n{}\n--- END HIGHLIGHTED PASSAGE ---\n",
+            only.text
+        ),
+        several => {
+            let blocks: String = several
+                .iter()
+                .enumerate()
+                .map(|(index, passage)| {
+                    format!(
+                        "--- HIGHLIGHTED PASSAGE {} (page {}) ---\n{}\n",
+                        index + 1,
+                        passage.page,
+                        passage.text
+                    )
+                })
+                .collect();
+
+            format!(
+                "The user has highlighted these passages and is asking about them together:\n\
+                 {blocks}--- END HIGHLIGHTED PASSAGES ---\n"
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,9 +227,16 @@ mod tests {
         assert_eq!(build_conversation(&[], "質問"), vec![Turn::user("質問")]);
     }
 
+    fn one(passage: &str) -> Vec<Passage> {
+        vec![Passage {
+            page: 5,
+            text: passage.to_owned(),
+        }]
+    }
+
     #[test]
     fn a_partial_excerpt_names_the_pages_it_shows() {
-        let prompt = build_system_prompt(&excerpt(true), "一節", false);
+        let prompt = build_system_prompt(&[excerpt(true)], &one("一節"), false);
 
         assert!(prompt.contains("excerpt (pages 5-8 of the 12-page document)"));
         assert!(prompt.contains("You are shown only pages 5-8"));
@@ -180,7 +245,7 @@ mod tests {
     /// A one-page book is never told it is looking at a fragment.
     #[test]
     fn a_whole_excerpt_is_called_the_document() {
-        let prompt = build_system_prompt(&excerpt(false), "一節", false);
+        let prompt = build_system_prompt(&[excerpt(false)], &one("一節"), false);
 
         assert!(prompt.contains("Use the following document as your primary context"));
         assert!(!prompt.contains("excerpt"));
@@ -189,7 +254,7 @@ mod tests {
 
     #[test]
     fn the_passage_and_the_text_travel_in_their_own_blocks() {
-        let prompt = build_system_prompt(&excerpt(true), "選んだ一節", false);
+        let prompt = build_system_prompt(&[excerpt(true)], &one("選んだ一節"), false);
 
         let document = prompt
             .split("--- DOCUMENT START ---")
@@ -204,10 +269,11 @@ mod tests {
     #[test]
     fn web_search_is_offered_only_when_it_is_on() {
         assert!(
-            build_system_prompt(&excerpt(true), "一節", true).contains("you may use web search")
+            build_system_prompt(&[excerpt(true)], &one("一節"), true)
+                .contains("you may use web search")
         );
         assert!(
-            build_system_prompt(&excerpt(true), "一節", false)
+            build_system_prompt(&[excerpt(true)], &one("一節"), false)
                 .contains("Respond using only the excerpt context")
         );
     }

@@ -15,9 +15,9 @@
 use pedro_agent::{AgentError, AgentEvent, Cancellation, DiscoveredAgent, Prompt};
 
 use crate::citation::{BookText, parse_citations};
-use crate::excerpt::select_excerpt;
+use crate::excerpt::select_excerpts;
 use crate::model::{ChatMessage, Role};
-use crate::prompt::{Turn, build_conversation, build_system_prompt};
+use crate::prompt::{Passage, Turn, build_conversation, build_system_prompt};
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, thiserror::Error)]
@@ -38,9 +38,13 @@ pub enum ChatError {
 /// What the reader is asking, and about what.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
-    /// The passage the question is about. Its page decides how much of the
-    /// book travels with it, and its conversation is where the answer lands.
-    pub highlight_id: String,
+    /// The passages the question is about, in the order they were marked.
+    ///
+    /// Their pages decide how much of the book travels with the question. The
+    /// first is where the conversation lives: a question about two passages is
+    /// still one conversation, and it has to hang somewhere the reader can find
+    /// it again.
+    pub highlight_ids: Vec<String>,
     pub text: String,
     /// Whether the agent may look beyond the book.
     pub web_search: bool,
@@ -63,16 +67,39 @@ pub struct Asked {
 /// therefore leaves the question in the conversation, which is the honest
 /// record: the reader did ask, and can ask again without retyping it.
 pub fn prepare(store: &Store, question: &Question) -> Result<Asked, ChatError> {
-    let highlight = store
-        .highlight(&question.highlight_id)?
-        .ok_or_else(|| ChatError::NoSuchHighlight(question.highlight_id.clone()))?;
+    let mut marked = Vec::with_capacity(question.highlight_ids.len());
+    for id in &question.highlight_ids {
+        marked.push(
+            store
+                .highlight(id)?
+                .ok_or_else(|| ChatError::NoSuchHighlight(id.clone()))?,
+        );
+    }
+
+    // The first passage is the one the conversation belongs to.
+    let highlight = marked
+        .first()
+        .cloned()
+        .ok_or_else(|| ChatError::NoSuchHighlight(String::new()))?;
     let book = store
         .book(&highlight.book_id)?
         .ok_or_else(|| ChatError::NoSuchBook(highlight.book_id.clone()))?;
 
     let full_text = store.full_text(&book.id)?;
-    let excerpt = select_excerpt(&full_text, highlight.page_number, &book.outline);
-    let system = build_system_prompt(&excerpt, &highlight.selected_text, question.web_search);
+    let pages: Vec<u32> = marked
+        .iter()
+        .map(|highlight| highlight.page_number)
+        .collect();
+    let passages: Vec<Passage> = marked
+        .iter()
+        .map(|highlight| Passage {
+            page: highlight.page_number,
+            text: highlight.selected_text.clone(),
+        })
+        .collect();
+
+    let excerpts = select_excerpts(&full_text, &pages, &book.outline);
+    let system = build_system_prompt(&excerpts, &passages, question.web_search);
 
     let history: Vec<Turn> = store
         .messages(&highlight.id)?

@@ -117,6 +117,12 @@ pub struct Pedro {
     pub(crate) page_scroll: UniformListScrollHandle,
     /// Whether the pointer is down on the page, dragging out a passage.
     pub(crate) selecting: bool,
+    /// The passages the next question is about, in the order they were marked.
+    ///
+    /// A question can be about two places in a book at once — "how does this
+    /// square with that" is the reason to have a reader that can be asked
+    /// anything — so marking a passage adds to this rather than replacing it.
+    pub(crate) attached: Vec<NewHighlight>,
     /// The last thing that went wrong where the reader was looking. Shown in
     /// the sidebar rather than as a notification: a file that could not be
     /// added is about the list it is missing from.
@@ -174,6 +180,7 @@ impl Pedro {
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
             selecting: false,
+            attached: Vec::new(),
             notice: None,
             window_drag_armed: false,
         }
@@ -767,45 +774,57 @@ impl Pedro {
 
         self.selecting = false;
 
-        // A marked passage becomes the subject of the panel: it is what the
-        // next question will be about, and the panel is where the reader is
-        // going to be looking. The one exception is a panel busy writing an
+        // A marked passage joins the question being written, and becomes what
+        // the panel is about. The one exception is a panel busy writing an
         // answer, which is not a place to put something else — and sending is
         // refused while it is anyway.
         let busy = self.chat.as_ref().is_some_and(Conversation::is_answering);
-        if let Some(passage) = self.selected_text().filter(|_| !busy)
-            && let Some(page) = self.open_document().and_then(|open| open.selection())
-        {
-            self.chat = Some(Conversation::about(passage, page.page));
+        if let Some(passage) = self.marked_passage().filter(|_| !busy) {
+            let subject = passage.selected_text.clone();
+            let page = passage.page_number;
+
+            // Marking the same words twice is a reader adjusting a drag, not
+            // asking about the passage twice.
+            self.attached
+                .retain(|held| held.selected_text != passage.selected_text);
+            self.attached.push(passage);
+
+            if self
+                .chat
+                .as_ref()
+                .is_none_or(|chat| chat.messages.is_empty())
+            {
+                self.chat = Some(Conversation::about(subject, page));
+            }
         }
 
         cx.notify();
     }
 
-    /// Puts the marked passage down without asking about it.
+    /// Puts one attached passage down.
     ///
-    /// The conversation it opened goes with it, unless something has been said
-    /// in it — an answer already given is not something a passing selection
-    /// should be able to close.
-    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+    /// When it was the last one, the conversation it opened goes with it —
+    /// unless something has been said in it, since an answer already given is
+    /// not something a passing drag should be able to close.
+    pub(crate) fn detach_passage(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at < self.attached.len() {
+            self.attached.remove(at);
+        }
+
         if let Some(open) = self.document_mut() {
             open.selection = None;
         }
 
-        if self
-            .chat
-            .as_ref()
-            .is_some_and(|chat| chat.messages.is_empty() && !chat.is_answering())
+        if self.attached.is_empty()
+            && self
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.messages.is_empty() && !chat.is_answering())
         {
             self.chat = None;
         }
 
         cx.notify();
-    }
-
-    /// The passage a question would quote, if the reader has marked one.
-    pub(crate) fn selected_text(&self) -> Option<String> {
-        self.open_document()?.selected_text()
     }
 
     /// Moves `by` pages and draws what that lands on.
@@ -1090,15 +1109,29 @@ impl Pedro {
             cx.notify();
             return;
         };
-        let Some((book_id, highlight)) = self.marked_passage() else {
+        let Some(book_id) = self
+            .active_tab()
+            .and_then(|tab| tab.id.strip_prefix("book:"))
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        if self.attached.is_empty() {
             self.notice = Some("Drag across the page to choose a passage first.".into());
             cx.notify();
             return;
-        };
+        }
+        let passages = std::mem::take(&mut self.attached);
 
-        let conversation = self.chat.get_or_insert_with(|| {
-            Conversation::about(highlight.selected_text.clone(), highlight.page_number)
-        });
+        // The conversation belongs to the first passage, which is where the
+        // reader will look for it again.
+        let subject = passages
+            .first()
+            .map(|first| (first.selected_text.clone(), first.page_number))
+            .unwrap_or_default();
+        let conversation = self
+            .chat
+            .get_or_insert_with(|| Conversation::about(subject.0, subject.1));
         conversation.asked(question.clone());
         let cancellation = conversation.cancellation.clone();
 
@@ -1117,14 +1150,19 @@ impl Pedro {
             // saved, because those run on this same pool.
             let asked = {
                 let store = store.lock();
-                let stored = store
-                    .add_highlight(&book_id, highlight)
-                    .map_err(|err| (err.to_string(), None))?;
+
+                let mut highlight_ids = Vec::with_capacity(passages.len());
+                for passage in passages {
+                    let stored = store
+                        .add_highlight(&book_id, passage)
+                        .map_err(|err| (err.to_string(), None))?;
+                    highlight_ids.push(stored.id);
+                }
 
                 prepare(
                     &store,
                     &Question {
-                        highlight_id: stored.id,
+                        highlight_ids,
                         text: question,
                         web_search,
                     },
@@ -1197,20 +1235,16 @@ impl Pedro {
         cx.notify();
     }
 
-    /// The passage to ask about, and the book it is in.
-    fn marked_passage(&self) -> Option<(String, NewHighlight)> {
-        let tab = self.active_tab()?;
-        let book_id = tab.id.strip_prefix("book:")?.to_owned();
-        let open = tab.document.as_ref()?;
+    /// The passage under the drag that has just ended.
+    fn marked_passage(&self) -> Option<NewHighlight> {
+        let open = self.open_document()?;
+        let page = open.selection()?.page;
 
-        Some((
-            book_id,
-            NewHighlight {
-                selected_text: open.selected_text()?,
-                page_number: open.selection()?.page,
-                rects: open.selection_rects(open.selection()?.page),
-            },
-        ))
+        Some(NewHighlight {
+            selected_text: open.selected_text()?,
+            page_number: page,
+            rects: open.selection_rects(page),
+        })
     }
 
     /// The CLI that answers: the one the reader chose, or the first found.
