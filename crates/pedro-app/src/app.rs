@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
@@ -65,13 +64,6 @@ fn sign_in_command(err: &pedro_core::chat::ChatError) -> Option<&'static str> {
 /// continuous zoom would rasterise a new page for every step of the way.
 const ZOOM_STEPS: [f32; 7] = [0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 
-/// How often the answer on screen catches up with the answer that has arrived.
-///
-/// An agent does not deliver evenly — a hundred characters at once, then a
-/// second of nothing — and drawing exactly what arrived puts that unevenness on
-/// screen. Showing a little more on a steady beat turns arrival into writing.
-const ANSWER_FRAME: Duration = Duration::from_millis(33);
-
 pub struct Pedro {
     focus_handle: FocusHandle,
     pub(crate) search: Entity<InputState>,
@@ -99,8 +91,6 @@ pub struct Pedro {
     pub(crate) answering: Option<pedro_agent::AgentKind>,
     /// How large a page is drawn, as a multiple of [`PAGE_HEIGHT`].
     pub(crate) zoom: f32,
-    /// Whether the beat that walks an answer onto the screen is running.
-    revealing: bool,
     /// The row whose remove button has been pressed once.
     ///
     /// Removing a book takes its highlights and conversations with it, so it
@@ -175,7 +165,6 @@ impl Pedro {
             show_secondary: false,
             answering: None,
             zoom: 1.0,
-            revealing: false,
             confirming_removal: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
@@ -1330,40 +1319,37 @@ impl Pedro {
         };
 
         chat.streaming.push_str(delta);
-        self.keep_revealing(cx);
+        cx.notify();
     }
 
-    /// Runs the beat that walks the answer onto the screen.
+    /// Walks the answer onto the screen, one drawn frame at a time.
     ///
-    /// One at a time: the loop keeps itself alive while anything is hidden and
-    /// stops when it has caught up, and starting a second would double the
-    /// rate.
-    fn keep_revealing(&mut self, cx: &mut Context<Self>) {
-        if self.revealing {
+    /// This runs from `render` rather than from a timer, and that is the whole
+    /// point. At a fixed beat each step has to carry whatever the agent
+    /// produced in that beat — at 33ms and a typical rate, ten characters,
+    /// which is a chunk however smoothly the rate was eased into it. The
+    /// display is the only clock that divides the same text into the largest
+    /// number of steps a reader can actually see, so it is the one to use: on
+    /// a 120Hz screen the same answer arrives two or three characters at a
+    /// time.
+    ///
+    /// Asking for the next frame is what keeps it going; when there is nothing
+    /// left to write nothing is asked for, and the window goes back to sleep.
+    fn write_a_little_more(&mut self, window: &mut Window) {
+        let Some(chat) = &mut self.chat else {
             return;
-        }
+        };
 
-        self.revealing = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(ANSWER_FRAME).await;
-
-                let more = this.update(cx, |this, cx| {
-                    let more = this.chat.as_mut().is_some_and(|chat| chat.reveal_more());
-
-                    cx.notify();
-                    this.revealing = more;
-                    more
-                });
-
-                match more {
-                    Ok(true) => continue,
-                    // Either everything is on screen, or the window is gone.
-                    _ => break,
-                }
+        if chat.reveal_more() {
+            window.request_animation_frame();
+        } else {
+            // Caught up: an agent that finished while the answer was still
+            // being written has been holding its stored turns, and this is the
+            // moment they can go in unnoticed.
+            if chat.settle() {
+                window.request_animation_frame();
             }
-        })
-        .detach();
+        }
     }
 
     fn answered(
@@ -1468,6 +1454,9 @@ impl Pedro {
         if let Some(chat) = &mut self.chat {
             chat.cancellation.cancel();
             chat.reveal_everything();
+            // Nothing is left to write, so anything the agent managed to
+            // finish before the cancellation can go in now.
+            chat.settle();
             cx.notify();
         }
     }
@@ -1504,6 +1493,8 @@ impl Focusable for Pedro {
 
 impl Render for Pedro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.write_a_little_more(window);
+
         v_flex()
             .id("pedro")
             .key_context("Pedro")
