@@ -4174,6 +4174,7 @@ dependencies = [
  "pedro-agent",
  "pedro-core",
  "pedro-pdf",
+ "pedro-search",
  "time",
  "tracing",
  "tracing-subscriber",
@@ -4186,6 +4187,7 @@ dependencies = [
  "dirs 6.0.0",
  "pedro-agent",
  "pedro-pdf",
+ "pedro-search",
  "regex",
  "rusqlite",
  "serde",
@@ -4207,6 +4209,16 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "pedro-search"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

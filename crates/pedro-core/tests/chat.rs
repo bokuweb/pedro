@@ -19,7 +19,7 @@ fn reading(name: &str, pages: &[&str], marked: &str, page: u32) -> (Store, Highl
     let root = std::env::temp_dir().join(format!("pedro-chat-{name}"));
     let _ = std::fs::remove_dir_all(&root);
 
-    let store = Store::open(&root).expect("a writable library");
+    let mut store = Store::open(&root).expect("a writable library");
     let source = root.join("book.pdf");
     std::fs::write(&source, pdf_with_pages(pages)).expect("a writable file");
 
@@ -124,7 +124,7 @@ fn asked(store: &Store, highlight: &Highlight, cli: PathBuf, text: &str) -> Vec<
 
 #[test]
 fn an_answer_is_streamed_and_stored_with_its_sources() {
-    let (store, highlight) = reading(
+    let (mut store, highlight) = reading(
         "sources",
         &["preface", "the runtime runs at the edge", "later chapter"],
         "the runtime",
@@ -165,7 +165,7 @@ fn an_answer_is_streamed_and_stored_with_its_sources() {
 /// it survives all the way into the stored answer.
 #[test]
 fn a_quote_the_book_does_not_hold_is_stored_as_a_miss() {
-    let (store, highlight) = reading("miss", &["preface", "the runtime"], "the runtime", 2);
+    let (mut store, highlight) = reading("miss", &["preface", "the runtime"], "the runtime", 2);
 
     let answer = "Something else[1].\n\n## Sources\n[1] \"a sentence this book never printed\"";
     asked(
@@ -186,7 +186,7 @@ fn a_quote_the_book_does_not_hold_is_stored_as_a_miss() {
 /// with the earlier answer's `## Sources` section left off.
 #[test]
 fn a_second_question_carries_the_conversation_without_repeating_the_sources() {
-    let (store, highlight) = reading("history", &["preface", "the runtime"], "the runtime", 2);
+    let (mut store, highlight) = reading("history", &["preface", "the runtime"], "the runtime", 2);
 
     let first = "It runs at the edge[1].\n\n## Sources\n[1] \"the runtime\"";
     asked(
@@ -223,7 +223,7 @@ fn a_second_question_carries_the_conversation_without_repeating_the_sources() {
 fn only_the_pages_around_the_highlight_are_sent() {
     let pages: Vec<String> = (1..=40).map(|page| format!("page{page}")).collect();
     let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
-    let (store, highlight) = reading("excerpt", &pages, "page20", 20);
+    let (mut store, highlight) = reading("excerpt", &pages, "page20", 20);
 
     let recorder = recording("chat-excerpt");
     asked(&store, &highlight, recorder.clone(), "これは?");
@@ -247,7 +247,7 @@ fn only_the_pages_around_the_highlight_are_sent() {
 /// and should not have to type it again.
 #[test]
 fn a_refused_question_is_still_recorded() {
-    let (store, highlight) = reading("refused", &["preface", "the runtime"], "the runtime", 2);
+    let (mut store, highlight) = reading("refused", &["preface", "the runtime"], "the runtime", 2);
 
     let refusing = fake_cli(
         "chat-refusal",
@@ -311,7 +311,7 @@ fn the_stand_in_is_written_where_it_is_run_from() {
 fn a_question_can_be_about_two_passages_at_once() {
     let pages: Vec<String> = (1..=40).map(|page| format!("page{page}")).collect();
     let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
-    let (store, first) = reading("two-passages", &pages, "page5", 5);
+    let (mut store, first) = reading("two-passages", &pages, "page5", 5);
 
     let book_id = first.book_id.clone();
     let second = store

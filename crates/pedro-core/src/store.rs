@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use pedro_pdf::{Document, OutlineItem, PdfError};
+use pedro_search::index;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
@@ -34,6 +35,9 @@ const DOCUMENTS: &str = "documents";
 pub enum StoreError {
     #[error("the library database failed: {0}")]
     Database(#[from] rusqlite::Error),
+
+    #[error(transparent)]
+    Index(#[from] pedro_search::IndexError),
 
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -56,6 +60,9 @@ pub struct Store {
     root: PathBuf,
     connection: Connection,
 }
+
+/// How many passages a search returns before anyone asks for fewer.
+const SEARCH_LIMIT: usize = 40;
 
 impl Store {
     /// Opens the library under `root`, creating it if it is not there yet.
@@ -85,6 +92,13 @@ impl Store {
         &self.root
     }
 
+    /// The connection, for tests that have to put the library into a state it
+    /// would otherwise take an older version of pedro to produce.
+    #[doc(hidden)]
+    pub fn connection(&self) -> &rusqlite::Connection {
+        &self.connection
+    }
+
     /// Where a book's bytes are stored.
     pub fn document_path(&self, book: &Book) -> PathBuf {
         self.path_for_hash(&book.file_hash)
@@ -98,7 +112,7 @@ impl Store {
     /// a better name renames it.
     ///
     /// Reads the whole document, so this belongs on a background thread.
-    pub fn add_document(&self, source: &Path) -> Result<Book, StoreError> {
+    pub fn add_document(&mut self, source: &Path) -> Result<Book, StoreError> {
         let bytes = std::fs::read(source)?;
         let file_hash = hash_of(&bytes);
         let file_name = source
@@ -140,7 +154,49 @@ impl Store {
             ],
         )?;
 
+        // Searchable before it is opened: a reader who adds a book and asks
+        // where something is in it should not have to open it first.
+        self.index_book(&id, &extracted.full_text)?;
+
         self.book(&id)?.ok_or(StoreError::NoSuchBook(id))
+    }
+
+    /// Cuts a book into passages and puts them in the search index.
+    ///
+    /// Reading a book is what costs; this is a few thousand rows and one
+    /// transaction, so it happens on the same thread that just read the book.
+    pub fn index_book(&mut self, book_id: &str, full_text: &str) -> Result<(), StoreError> {
+        let chunks = pedro_search::chunk::split(full_text, crate::excerpt::PAGE_DELIMITER);
+        index::index_book(&mut self.connection, book_id, &chunks)?;
+
+        tracing::info!(book_id, passages = chunks.len(), "indexed a book");
+        Ok(())
+    }
+
+    /// Indexes the books added before there was an index to put them in.
+    ///
+    /// Returns how many it did. Called at startup, where finding nothing to do
+    /// is the usual answer and costs one query per book.
+    pub fn index_missing(&mut self) -> Result<usize, StoreError> {
+        let books = self.books()?;
+        let mut done = 0;
+
+        for book in books {
+            if index::is_indexed(&self.connection, &book.id)? {
+                continue;
+            }
+
+            let full_text = self.full_text(&book.id)?;
+            self.index_book(&book.id, &full_text)?;
+            done += 1;
+        }
+
+        Ok(done)
+    }
+
+    /// The passages matching `query`, across every book, best first.
+    pub fn search(&self, query: &str) -> Result<Vec<pedro_search::Hit>, StoreError> {
+        Ok(index::search(&self.connection, query, SEARCH_LIMIT)?)
     }
 
     /// Every book, most recently touched first.
@@ -178,12 +234,15 @@ impl Store {
             .ok_or_else(|| StoreError::NoSuchBook(book_id.to_owned()))
     }
 
-    /// Removes a book, its highlights, its conversations and its bytes.
+    /// Removes a book, its highlights, its conversations, its bytes and
+    /// everything indexed from it.
     pub fn remove_book(&self, id: &str) -> Result<(), StoreError> {
         let Some(book) = self.book(id)? else {
             return Err(StoreError::NoSuchBook(id.to_owned()));
         };
 
+        // Before the row goes: the index is found through it.
+        index::forget(&self.connection, id)?;
         self.connection
             .execute("DELETE FROM books WHERE id = ?1", [id])?;
 
@@ -580,6 +639,11 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
     if version < 1 {
         connection.execute_batch(SCHEMA)?;
         connection.pragma_update(None, "user_version", 1)?;
+    }
+
+    if version < 2 {
+        index::create(connection)?;
+        connection.pragma_update(None, "user_version", 2)?;
     }
 
     Ok(())

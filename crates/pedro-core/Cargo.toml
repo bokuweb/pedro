@@ -9,6 +9,7 @@ description = "The reader's domain: library storage, excerpts, citations and cha
 [dependencies]
 pedro-agent.workspace = true
 pedro-pdf.workspace = true
+pedro-search.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
