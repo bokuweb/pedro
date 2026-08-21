@@ -28,6 +28,18 @@ impl AgentKind {
         }
     }
 
+    /// How this CLI is signed in to, as a command a reader can run.
+    ///
+    /// Pedro never handles the credentials itself — that is the point of
+    /// borrowing a CLI that already has them — so the most it can do about a
+    /// CLI that is signed out is say exactly what to run.
+    pub fn sign_in_command(self) -> &'static str {
+        match self {
+            AgentKind::ClaudeCode => "claude /login",
+            AgentKind::Codex => "codex login",
+        }
+    }
+
     /// The name shown in the UI.
     pub fn display_name(self) -> &'static str {
         match self {

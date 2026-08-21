@@ -24,6 +24,9 @@ pub struct Conversation {
     pub streaming: String,
     /// Why the last question failed, if it did.
     pub error: Option<SharedString>,
+    /// The command that would fix it, when the failure was a CLI that is
+    /// installed but signed out.
+    pub sign_in: Option<&'static str>,
     /// Stops the CLI mid-answer.
     pub cancellation: Cancellation,
 }
@@ -38,6 +41,7 @@ impl Conversation {
             pending: None,
             streaming: String::new(),
             error: None,
+            sign_in: None,
             cancellation: Cancellation::new(),
         }
     }
@@ -53,6 +57,7 @@ impl Conversation {
         self.pending = Some(question.into());
         self.streaming.clear();
         self.error = None;
+        self.sign_in = None;
         self.cancellation = Cancellation::new();
     }
 
@@ -62,9 +67,10 @@ impl Conversation {
         self.streaming.clear();
     }
 
-    pub fn failed(&mut self, why: impl Into<SharedString>) {
+    pub fn failed(&mut self, why: impl Into<SharedString>, sign_in: Option<&'static str>) {
         self.pending = None;
         self.streaming.clear();
         self.error = Some(why.into());
+        self.sign_in = sign_in;
     }
 }

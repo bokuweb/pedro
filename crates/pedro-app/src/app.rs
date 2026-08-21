@@ -28,6 +28,7 @@ use crate::document::{OpenDocument, Page, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
+use pedro_agent::AgentError;
 
 actions!(
     pedro,
@@ -47,6 +48,17 @@ actions!(
 /// window, because fitting means re-rasterising every page on every resize;
 /// the zoom is how a reader who wants a different size asks for one.
 pub(crate) const PAGE_HEIGHT: f32 = 640.;
+
+/// The command that would fix a failure, when the failure is a CLI that is
+/// installed but signed out.
+fn sign_in_command(err: &pedro_core::chat::ChatError) -> Option<&'static str> {
+    match err {
+        pedro_core::chat::ChatError::Agent(AgentError::NotSignedIn { command, .. }) => {
+            Some(command)
+        }
+        _ => None,
+    }
+}
 
 /// What zoom can be set to. A book is read at one of a few sizes, and a
 /// continuous zoom would rasterise a new page for every step of the way.
@@ -1043,7 +1055,7 @@ impl Pedro {
             let store = store.lock();
             let stored = store
                 .add_highlight(&book_id, highlight)
-                .map_err(|err| err.to_string())?;
+                .map_err(|err| (err.to_string(), None))?;
 
             let answer = ask(
                 &store,
@@ -1062,8 +1074,10 @@ impl Pedro {
             );
 
             match answer {
-                Ok(_) => store.messages(&stored.id).map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
+                Ok(_) => store
+                    .messages(&stored.id)
+                    .map_err(|err| (err.to_string(), None)),
+                Err(err) => Err((err.to_string(), sign_in_command(&err))),
             }
         });
 
@@ -1185,7 +1199,11 @@ impl Pedro {
         }
     }
 
-    fn answered(&mut self, finished: Result<Vec<ChatMessage>, String>, cx: &mut Context<Self>) {
+    fn answered(
+        &mut self,
+        finished: Result<Vec<ChatMessage>, (String, Option<&'static str>)>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(chat) = &mut self.chat {
             match finished {
                 Ok(messages) => {
@@ -1194,14 +1212,40 @@ impl Pedro {
                     // conversation off; the page has not been told yet.
                     self.reload_highlights(cx);
                 }
-                Err(why) => {
+                Err((why, sign_in)) => {
                     tracing::error!(why, "the agent did not answer");
-                    chat.failed(why);
+                    chat.failed(why, sign_in);
                 }
             }
         }
 
         cx.notify();
+    }
+
+    /// Opens a terminal on the command that signs a CLI in.
+    ///
+    /// Pedro never sees the credentials — borrowing a CLI that already has them
+    /// is the whole design — so the most it can do is put the reader in front
+    /// of the command with the command already typed.
+    pub(crate) fn sign_in(&mut self, command: &'static str, cx: &mut Context<Self>) {
+        let script = format!(r#"tell application "Terminal" to do script "{command}""#);
+
+        cx.background_executor()
+            .spawn(async move {
+                let opened = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &script,
+                        "-e",
+                        r#"tell application "Terminal" to activate"#,
+                    ])
+                    .status();
+
+                if let Err(err) = opened {
+                    tracing::warn!(?err, command, "could not open a terminal to sign in");
+                }
+            })
+            .detach();
     }
 
     /// Reads the book's marked passages back out of the store.

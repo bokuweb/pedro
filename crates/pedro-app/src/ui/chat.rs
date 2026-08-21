@@ -60,9 +60,62 @@ impl Pedro {
                         .when(chat.is_answering(), |this| {
                             this.child(render_answer_in_progress(&chat.streaming, cx))
                         })
-                        .children(chat.error.clone().map(render_failure)),
+                        .children(
+                            chat.error
+                                .clone()
+                                .map(|why| self.render_failure(why, chat.sign_in, cx)),
+                        ),
                 ),
         )
+    }
+
+    /// What went wrong, and the one thing that fixes it when there is one.
+    fn render_failure(
+        &self,
+        why: SharedString,
+        sign_in: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        v_flex()
+            .px(px(12.))
+            .py(px(9.))
+            .gap(px(8.))
+            .rounded(px(12.))
+            .bg(palette::danger().opacity(0.14))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_start()
+                    .child(icon(IconName::TriangleAlert, px(13.), palette::danger()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(palette::danger())
+                            .child(why),
+                    ),
+            )
+            .children(sign_in.map(|command| {
+                h_flex()
+                    .id("sign-in")
+                    .px(px(9.))
+                    .py(px(4.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(8.))
+                    .bg(palette::surface())
+                    .cursor_pointer()
+                    .hover(|this| this.bg(palette::surface_hover()))
+                    .child(icon(IconName::SquareTerminal, px(12.), palette::code()))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::text())
+                            .child(format!("Sign in — {command}")),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in(command, cx)))
+            }))
     }
 
     fn render_chat_header(
@@ -254,23 +307,4 @@ fn why(miss: PageMiss) -> &'static str {
         PageMiss::NotInBook => "not in the book",
         PageMiss::SinglePageBook => "one page",
     }
-}
-
-fn render_failure(why: SharedString) -> impl IntoElement {
-    h_flex()
-        .px(px(12.))
-        .py(px(9.))
-        .gap(px(8.))
-        .items_start()
-        .rounded(px(12.))
-        .bg(palette::danger().opacity(0.14))
-        .child(icon(IconName::TriangleAlert, px(13.), palette::danger()))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.))
-                .text_color(palette::danger())
-                .child(why),
-        )
 }

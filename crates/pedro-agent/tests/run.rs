@@ -120,10 +120,10 @@ echo '{"type":"turn.completed"}'
 }
 
 /// The shape recorded from a CLI that is not logged in: an error reported in
-/// the stream, and a non-zero exit. The message is what the reader can act on,
-/// so it is the one that survives.
+/// the stream, and a non-zero exit. Signing in is the one refusal with an
+/// obvious next step, so it is told apart from the rest and carries it.
 #[test]
-fn a_refusal_is_reported_with_the_reason_the_cli_gave() {
+fn being_signed_out_is_reported_with_the_way_to_fix_it() {
     let cli = fake_cli(
         "claude-refusal",
         r#"
@@ -134,7 +134,26 @@ exit 1
 
     let error = ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap_err();
     assert!(
-        matches!(&error, AgentError::Refused(reason) if reason.contains("Not logged in")),
+        matches!(&error, AgentError::NotSignedIn { command, .. } if *command == "claude /login"),
+        "{error}"
+    );
+}
+
+/// Any other refusal is passed through as the CLI worded it: it usually names
+/// something the reader can act on, and pedro cannot word it better.
+#[test]
+fn any_other_refusal_is_passed_through_as_the_cli_worded_it() {
+    let cli = fake_cli(
+        "claude-out-of-credit",
+        r#"
+echo '{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}'
+exit 1
+"#,
+    );
+
+    let error = ask(&agent(AgentKind::ClaudeCode, cli)).0.unwrap_err();
+    assert!(
+        matches!(&error, AgentError::Refused(reason) if reason.contains("Credit balance")),
         "{error}"
     );
 }

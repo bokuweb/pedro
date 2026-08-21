@@ -30,11 +30,19 @@ pub enum AgentError {
         source: std::io::Error,
     },
 
-    /// The CLI itself said what went wrong — not logged in, no quota, a model
-    /// it cannot reach. This is the message worth putting in front of the
-    /// reader, because it usually names something they can fix.
+    /// The CLI itself said what went wrong — no quota, a model it cannot
+    /// reach. This is the message worth putting in front of the reader,
+    /// because it usually names something they can fix.
     #[error("{0}")]
     Refused(String),
+
+    /// The CLI is installed but signed out, which is the one refusal with an
+    /// obvious next step rather than a message to read.
+    #[error("{name} is not signed in. Run `{command}` in a terminal.")]
+    NotSignedIn {
+        name: &'static str,
+        command: &'static str,
+    },
 
     #[error("{program} exited with {status}{}", format_stderr(.stderr))]
     Exited {
@@ -156,7 +164,13 @@ pub fn run(
         return Err(AgentError::Cancelled);
     }
     if let Some(reason) = refusal {
-        return Err(AgentError::Refused(reason));
+        return Err(match is_signed_out(&reason) {
+            true => AgentError::NotSignedIn {
+                name: agent.kind.display_name(),
+                command: agent.kind.sign_in_command(),
+            },
+            false => AgentError::Refused(reason),
+        });
     }
     if !status.success() {
         return Err(AgentError::Exited {
@@ -170,6 +184,25 @@ pub fn run(
     }
 
     Ok(answer)
+}
+
+/// Whether a refusal is the CLI saying it has no credentials.
+///
+/// Matched on the words rather than on an exit code, because neither CLI has
+/// one for this: both report it as an ordinary answer that happens to be a
+/// sentence about logging in.
+fn is_signed_out(reason: &str) -> bool {
+    let reason = reason.to_lowercase();
+
+    [
+        "not logged in",
+        "/login",
+        "please log in",
+        "codex login",
+        "not authenticated",
+    ]
+    .iter()
+    .any(|phrase| reason.contains(phrase))
 }
 
 fn spawn(agent: &DiscoveredAgent, prompt: &Prompt) -> Result<Child, AgentError> {
@@ -402,6 +435,24 @@ mod tests {
 
             assert_eq!(separator, arguments.len() - 2, "{kind:?}");
         }
+    }
+
+    /// Recorded from the installed CLI without credentials, beside the shapes
+    /// the other one and a future version might use.
+    #[test]
+    fn a_refusal_about_credentials_is_told_apart_from_any_other() {
+        assert!(is_signed_out("Not logged in · Please run /login"));
+        assert!(is_signed_out("You are not authenticated. Run codex login."));
+        assert!(!is_signed_out("You have run out of credits."));
+        assert!(!is_signed_out(
+            "Model gpt-5.6 requires a newer version of Codex."
+        ));
+    }
+
+    #[test]
+    fn each_cli_says_how_to_sign_in_to_it() {
+        assert_eq!(AgentKind::ClaudeCode.sign_in_command(), "claude /login");
+        assert_eq!(AgentKind::Codex.sign_in_command(), "codex login");
     }
 
     #[test]

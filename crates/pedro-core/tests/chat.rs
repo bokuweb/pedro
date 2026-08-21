@@ -266,8 +266,10 @@ exit 1
     )
     .unwrap_err();
 
+    // The agent layer turns a signed-out CLI into the one refusal with an
+    // obvious next step, and the chat layer passes it through untouched.
     assert!(
-        matches!(&error, ChatError::Agent(agent) if agent.to_string().contains("Not logged in")),
+        matches!(&error, ChatError::Agent(agent) if agent.to_string().contains("not signed in")),
         "{error}"
     );
 
