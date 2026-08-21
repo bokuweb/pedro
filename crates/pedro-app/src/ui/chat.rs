@@ -34,7 +34,7 @@ use crate::app::Pedro;
 use crate::palette;
 use crate::ui::icon;
 
-const WIDTH: f32 = 380.;
+pub(crate) const CHAT_WIDTH: f32 = 380.;
 
 impl Pedro {
     pub(crate) fn render_chat(
@@ -42,6 +42,9 @@ impl Pedro {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        if !self.chat_pane.is_visible() {
+            return None;
+        }
         let chat = self.chat.as_ref()?;
 
         let turns: Vec<_> = chat
@@ -52,7 +55,8 @@ impl Pedro {
 
         Some(
             v_flex()
-                .w(px(WIDTH))
+                .w(px(self.chat_pane.width))
+                .overflow_hidden()
                 .h_full()
                 .flex_shrink_0()
                 .border_l_1()

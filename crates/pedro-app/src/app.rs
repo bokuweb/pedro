@@ -27,6 +27,7 @@ use crate::chat::Conversation;
 use crate::document::{OpenDocument, Page, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
+use crate::panes::Pane;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
 use gpui::UniformListScrollHandle;
 use pedro_agent::AgentError;
@@ -35,6 +36,8 @@ actions!(
     pedro,
     [
         FocusSearch,
+        ToggleSidebar,
+        ToggleChat,
         NextPage,
         PreviousPage,
         NextTab,
@@ -85,6 +88,10 @@ pub struct Pedro {
     pub(crate) library: Library,
     /// The conversation the chat panel is showing, if one is open.
     pub(crate) chat: Option<Conversation>,
+    /// The panel of books, and the panel of the conversation.
+    pub(crate) sidebar: Pane,
+    pub(crate) chat_pane: Pane,
+
     /// Whether the sidebar is showing the places that are settings rather than
     /// reading.
     pub(crate) show_secondary: bool,
@@ -164,6 +171,8 @@ impl Pedro {
             agent_status,
             library,
             chat: None,
+            sidebar: Pane::open(crate::ui::SIDEBAR_WIDTH),
+            chat_pane: Pane::shut(crate::ui::CHAT_WIDTH),
             show_secondary: false,
             answering: None,
             zoom: 1.0,
@@ -889,6 +898,7 @@ impl Pedro {
 
         self.show_page(highlight.page_number, cx);
         self.open_highlight(&highlight, cx);
+        self.show_chat(true, cx);
     }
 
     /// Reopens the conversation behind a marked passage.
@@ -901,6 +911,8 @@ impl Pedro {
             Conversation::about(highlight.selected_text.clone(), highlight.page_number);
         conversation.highlight_id = Some(highlight.id.clone());
         self.chat = Some(conversation);
+
+        self.show_chat(true, cx);
 
         let highlight_id = highlight.id.clone();
         cx.spawn(async move |this, cx| {
@@ -1083,6 +1095,42 @@ impl Pedro {
             .ok();
         })
         .detach();
+    }
+
+    pub(crate) fn toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.toggle();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_chat(&mut self, _: &ToggleChat, _: &mut Window, cx: &mut Context<Self>) {
+        self.chat_pane.toggle();
+        cx.notify();
+    }
+
+    /// Opens or shuts the conversation panel.
+    pub(crate) fn show_chat(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.chat_pane.set_open(open);
+        cx.notify();
+    }
+
+    /// Moves the panes one frame towards where they are going.
+    ///
+    /// On the display's clock rather than a timer of its own, for the same
+    /// reason the answer is written on it: it is the only rate at which a
+    /// change can actually be seen, and a pane that moves between two frames
+    /// has moved invisibly.
+    ///
+    /// Both are stepped, so opening one while the other is closing does not
+    /// leave the second stranded.
+    fn slide_panes(&mut self, window: &mut Window) {
+        if self.sidebar.step() | self.chat_pane.step() {
+            window.request_animation_frame();
+        }
     }
 
     pub(crate) fn toggle_secondary(&mut self, cx: &mut Context<Self>) {
@@ -1506,12 +1554,13 @@ impl Pedro {
         }
     }
 
+    /// Shuts the conversation panel, keeping the conversation.
+    ///
+    /// An answer being written is left to finish: the reader closed a panel,
+    /// which is not the same as saying they no longer want the answer. Stopping
+    /// it is what the Stop button is for.
     pub(crate) fn close_chat(&mut self, cx: &mut Context<Self>) {
-        if let Some(chat) = &self.chat {
-            chat.cancellation.cancel();
-        }
-        self.chat = None;
-        cx.notify();
+        self.show_chat(false, cx);
     }
 
     /// Jumps to the page a citation names.
@@ -1539,6 +1588,7 @@ impl Focusable for Pedro {
 impl Render for Pedro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.write_a_little_more(window);
+        self.slide_panes(window);
 
         v_flex()
             .id("pedro")
@@ -1547,6 +1597,8 @@ impl Render for Pedro {
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::previous_page))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_chat))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::zoom_in))
@@ -1559,7 +1611,7 @@ impl Render for Pedro {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(window, cx))
+                    .children(self.render_sidebar(window, cx))
                     .child(
                         v_flex()
                             .flex_1()

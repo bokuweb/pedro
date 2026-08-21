@@ -8,6 +8,9 @@ mod sidebar;
 mod tab_bar;
 mod window_drag;
 
+pub(crate) use chat::CHAT_WIDTH;
+pub(crate) use sidebar::SIDEBAR_WIDTH;
+
 use gpui::{Hsla, Pixels, Styled as _};
 use gpui_component::{Icon, IconName};
 

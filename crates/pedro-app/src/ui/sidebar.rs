@@ -23,7 +23,7 @@ use crate::palette;
 use crate::state::{AgentStatus, Entry, RailItem, Section, Status};
 use crate::ui::icon;
 
-const WIDTH: f32 = 300.;
+pub(crate) const SIDEBAR_WIDTH: f32 = 300.;
 
 /// How far the rows are inset from the panel edges. The fill on the active row
 /// stops here, which is what makes it read as a card rather than a band.
@@ -41,20 +41,27 @@ impl Pedro {
         &self,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        v_flex()
-            .w(px(WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .bg(palette::sidebar())
-            .border_r_1()
-            .border_color(palette::border())
-            .child(self.render_window_row(window, cx))
-            .child(self.render_navigation(cx))
-            .child(self.render_search())
-            .children(self.render_notice())
-            .child(self.render_sections(cx))
-            .child(self.render_agent_footer())
+    ) -> Option<impl IntoElement + use<>> {
+        if !self.sidebar.is_visible() {
+            return None;
+        }
+
+        Some(
+            v_flex()
+                .w(px(self.sidebar.width))
+                .overflow_hidden()
+                .h_full()
+                .flex_shrink_0()
+                .bg(palette::sidebar())
+                .border_r_1()
+                .border_color(palette::border())
+                .child(self.render_window_row(window, cx))
+                .child(self.render_navigation(cx))
+                .child(self.render_search())
+                .children(self.render_notice())
+                .child(self.render_sections(cx))
+                .child(self.render_agent_footer()),
+        )
     }
 
     /// The row the window controls sit in, with the panel's own actions beside

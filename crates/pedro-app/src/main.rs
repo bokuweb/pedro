@@ -6,6 +6,7 @@ mod chat;
 mod document;
 mod library;
 mod palette;
+mod panes;
 mod state;
 mod ui;
 
@@ -18,7 +19,8 @@ use gpui_component::input::{Backspace, Enter};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::{
-    FocusSearch, NextPage, NextTab, Pedro, PreviousPage, PreviousTab, ZoomIn, ZoomOut, ZoomReset,
+    FocusSearch, NextPage, NextTab, Pedro, PreviousPage, PreviousTab, ToggleChat, ToggleSidebar,
+    ZoomIn, ZoomOut, ZoomReset,
 };
 
 fn main() {
@@ -45,6 +47,9 @@ fn main() {
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("cmd-0", ZoomReset, None),
                 // The keys every tabbed application uses for this.
+                // What every editor with two side panels uses.
+                KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-alt-b", ToggleChat, None),
                 KeyBinding::new("cmd-shift-]", NextTab, None),
                 KeyBinding::new("cmd-shift-[", PreviousTab, None),
                 // Registered after `gpui_component::init`, so these shadow the
