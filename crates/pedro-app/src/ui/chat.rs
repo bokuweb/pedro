@@ -72,6 +72,15 @@ impl Pedro {
                             chat.error
                                 .clone()
                                 .map(|why| self.render_failure(why, chat.sign_in, cx)),
+                        )
+                        // A passage that has been marked but not asked about
+                        // yet: the panel is showing what the next question is
+                        // about, and saying so is better than looking empty.
+                        .when(
+                            chat.messages.is_empty()
+                                && !chat.is_answering()
+                                && chat.error.is_none(),
+                            |this| this.child(render_nothing_asked_yet()),
                         ),
                 ),
         )
@@ -175,6 +184,24 @@ impl Pedro {
                     .on_click(cx.listener(|this, _, _, cx| this.close_chat(cx))),
             )
     }
+}
+
+/// The panel with a subject and nothing said about it yet.
+fn render_nothing_asked_yet() -> impl IntoElement {
+    v_flex()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(palette::text_muted())
+                .child("Nothing asked about this passage yet."),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(palette::text_faint())
+                .child("Type a question below. ⏎ sends it, ⇧⏎ breaks the line."),
+        )
 }
 
 fn render_turn(

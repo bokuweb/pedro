@@ -761,11 +761,46 @@ impl Pedro {
     }
 
     pub(crate) fn finish_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selecting {
-            self.selecting = false;
-            tracing::debug!(marked = ?self.selected_text(), "selection finished");
-            cx.notify();
+        if !self.selecting {
+            return;
         }
+
+        self.selecting = false;
+
+        // A marked passage becomes the subject of the panel: it is what the
+        // next question will be about, and the panel is where the reader is
+        // going to be looking. The one exception is a panel busy writing an
+        // answer, which is not a place to put something else — and sending is
+        // refused while it is anyway.
+        let busy = self.chat.as_ref().is_some_and(Conversation::is_answering);
+        if let Some(passage) = self.selected_text().filter(|_| !busy)
+            && let Some(page) = self.open_document().and_then(|open| open.selection())
+        {
+            self.chat = Some(Conversation::about(passage, page.page));
+        }
+
+        cx.notify();
+    }
+
+    /// Puts the marked passage down without asking about it.
+    ///
+    /// The conversation it opened goes with it, unless something has been said
+    /// in it — an answer already given is not something a passing selection
+    /// should be able to close.
+    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = self.document_mut() {
+            open.selection = None;
+        }
+
+        if self
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.messages.is_empty() && !chat.is_answering())
+        {
+            self.chat = None;
+        }
+
+        cx.notify();
     }
 
     /// The passage a question would quote, if the reader has marked one.
