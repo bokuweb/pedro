@@ -210,7 +210,36 @@ impl Pedro {
             }
         };
 
+        self.reopen_last_book(cx);
         cx.notify();
+    }
+
+    /// Opens the book the reader was last in.
+    ///
+    /// A reader who closed the window in the middle of a chapter meant to come
+    /// back to it, and an empty reader on every launch makes them find their
+    /// way there again.
+    fn reopen_last_book(&mut self, cx: &mut Context<Self>) {
+        if !self.tabs.is_empty() {
+            return;
+        }
+
+        // `books` is ordered by when each was last touched, so the first with a
+        // place saved is the one that was being read.
+        let Some(book) = self
+            .library
+            .books()
+            .iter()
+            .find(|book| book.reading.is_some())
+            .cloned()
+        else {
+            return;
+        };
+
+        self.open_entry(
+            &Entry::opening(format!("book:{}", book.id), crate::library::title_of(&book)),
+            cx,
+        );
     }
 
     /// Asks for PDFs and adds whatever comes back.
@@ -521,6 +550,11 @@ impl Pedro {
         }
 
         if moved {
+            tracing::debug!(
+                top,
+                drawn_at = ?self.page_bounds.borrow().get(&top),
+                "the page in view changed"
+            );
             self.save_reading_position(cx);
         }
     }
@@ -635,8 +669,10 @@ impl Pedro {
         cx: &mut Context<Self>,
     ) {
         let Some((x, y)) = self.on_the_page(page, position) else {
+            tracing::debug!(page, ?position, known = ?self.page_bounds.borrow().keys().collect::<Vec<_>>(), "a press landed on no page");
             return;
         };
+        tracing::debug!(page, x, y, "press");
 
         // A passage already marked is a conversation, not a place to start a
         // new selection: pressing on one reopens what was said about it.
@@ -654,6 +690,12 @@ impl Pedro {
         };
 
         open.begin_selection(page, x, y);
+        tracing::debug!(
+            page,
+            characters = open.page(page).map(|held| held.chars_len()),
+            selection = ?open.selection,
+            "selection started"
+        );
         self.selecting = true;
         cx.notify();
     }
@@ -690,6 +732,7 @@ impl Pedro {
     pub(crate) fn finish_selection(&mut self, cx: &mut Context<Self>) {
         if self.selecting {
             self.selecting = false;
+            tracing::debug!(marked = ?self.selected_text(), "selection finished");
             cx.notify();
         }
     }

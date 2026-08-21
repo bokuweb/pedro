@@ -124,8 +124,13 @@ impl Pedro {
                     },
                 )
                 // Without a size of its own a canvas is laid out as nothing,
-                // and the bounds it reports are nothing too.
+                // and the bounds it reports are nothing too. Without a corner
+                // to sit in it takes its static position — which, as the second
+                // child of a block, is one whole page *below* the page, and
+                // every drag then lands above the top of the sheet.
                 .absolute()
+                .top(px(0.))
+                .left(px(0.))
                 .size_full(),
             )
             .on_mouse_down(

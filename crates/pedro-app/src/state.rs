@@ -114,6 +114,12 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// An entry built to be acted on rather than listed — the shell opening
+    /// something on the reader's behalf.
+    pub fn opening(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+        Self::new(id, label)
+    }
+
     fn new(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),

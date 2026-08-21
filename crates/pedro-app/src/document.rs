@@ -31,6 +31,13 @@ const OVERSAMPLE: f32 = 2.0;
 /// scrolling back a page never waits for pdfium.
 const KEEP: u32 = 4;
 
+impl Page {
+    /// How many characters of this page have a box of their own.
+    pub fn chars_len(&self) -> usize {
+        self.text.chars.len()
+    }
+}
+
 /// A page that has been rasterised, and the text that is on it.
 pub struct Page {
     pub image: Arc<RenderImage>,
