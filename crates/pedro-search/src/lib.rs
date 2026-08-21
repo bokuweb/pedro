@@ -11,8 +11,11 @@
 //! under one licence.
 
 pub mod chunk;
+pub mod embed;
+pub mod fuse;
 pub mod index;
 pub mod tokenize;
 
 pub use chunk::Chunk;
+pub use embed::{EmbedError, Embedder};
 pub use index::{Hit, IndexError};

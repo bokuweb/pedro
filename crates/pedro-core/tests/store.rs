@@ -149,7 +149,7 @@ fn removing_a_book_takes_its_highlights_conversations_and_bytes() {
 
 #[test]
 fn removing_a_book_that_is_not_there_says_so() {
-    let (mut store, _root) = library("removes-missing");
+    let (store, _root) = library("removes-missing");
 
     let error = store.remove_book("nope").unwrap_err();
     assert!(matches!(error, StoreError::NoSuchBook(_)), "{error}");
@@ -251,7 +251,7 @@ fn a_highlight_keeps_its_geometry() {
 
 #[test]
 fn a_highlight_on_a_book_that_is_not_there_says_so() {
-    let (mut store, _root) = library("highlights-missing");
+    let (store, _root) = library("highlights-missing");
 
     let error = store
         .add_highlight("nope", highlight_of("passage", 1))
@@ -300,7 +300,7 @@ fn a_conversation_is_stored_in_the_order_it_happened() {
 
 #[test]
 fn a_message_on_a_highlight_that_is_not_there_says_so() {
-    let (mut store, _root) = library("message-missing");
+    let (store, _root) = library("message-missing");
 
     let error = store
         .add_message("nope", Role::User, "これは?", &[])
@@ -400,7 +400,7 @@ fn an_outline_can_be_filled_in_later() {
 
 #[test]
 fn an_outline_for_a_book_that_is_not_there_says_so() {
-    let (mut store, _root) = library("outline-missing");
+    let (store, _root) = library("outline-missing");
 
     let error = store.set_outline("nope", &[]).unwrap_err();
     assert!(matches!(error, StoreError::NoSuchBook(_)), "{error}");

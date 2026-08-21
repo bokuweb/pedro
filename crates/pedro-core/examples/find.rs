@@ -20,6 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store = Store::open_default()?;
+    println!(
+        "searching by {}",
+        match store.can_search_by_meaning() {
+            true => "words and meaning",
+            false => "words alone (run scripts/fetch-embedding.sh for meaning)",
+        }
+    );
     let titles: std::collections::HashMap<String, String> = store
         .books()?
         .into_iter()

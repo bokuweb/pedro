@@ -6,7 +6,10 @@ use rusqlite::Connection;
 
 /// A database with the one table the index refers to, and the index itself.
 fn library() -> Connection {
-    let mut connection = Connection::open_in_memory().expect("an in-memory database");
+    // Before the connection is opened, which is when `vec0` is handed to it.
+    index::prepare();
+
+    let connection = Connection::open_in_memory().expect("an in-memory database");
     connection.pragma_update(None, "foreign_keys", "ON").ok();
     connection
         .execute_batch("CREATE TABLE books (id TEXT PRIMARY KEY);")
@@ -196,4 +199,100 @@ fn the_best_match_comes_first() {
     let hits = index::search(&connection, "素数", 10).expect("a search");
     assert_eq!(hits[0].page_number, 2);
     assert!(hits[0].score >= hits.last().expect("a hit").score);
+}
+
+/// Three passages, filed under vectors a test can reason about: the first
+/// points the same way as the query, the second halfway, the third at right
+/// angles to it.
+fn with_vectors() -> Connection {
+    let mut connection = library();
+    index::index_book(
+        &mut connection,
+        "book-a",
+        &[
+            chunk(1, 0, "the same way"),
+            chunk(2, 1, "halfway"),
+            chunk(3, 2, "at right angles"),
+        ],
+    )
+    .expect("indexed");
+
+    index::create_vectors(&connection, 2).expect("a vector table");
+
+    let ids: Vec<String> = connection
+        .prepare("SELECT id FROM chunks ORDER BY ord")
+        .expect("a query")
+        .query_map([], |row| row.get(0))
+        .expect("ids")
+        .collect::<Result<_, _>>()
+        .expect("ids");
+
+    let halfway = std::f32::consts::FRAC_1_SQRT_2;
+    index::index_vectors(
+        &mut connection,
+        &ids,
+        &[vec![1., 0.], vec![halfway, halfway], vec![0., 1.]],
+    )
+    .expect("stored vectors");
+
+    connection
+}
+
+/// The score has to be the cosine itself. `vec0` measures in L2 unless it is
+/// asked otherwise, and for normalised vectors L2 is `sqrt(2 - 2·cos)` — which
+/// for the halfway passage would read as 0.23 rather than 0.71, putting a good
+/// match below any floor worth having.
+#[test]
+fn the_score_is_the_cosine() {
+    let connection = with_vectors();
+    let hits = index::search_similar(&connection, &[1., 0.], 10, -1.0).expect("a search");
+
+    assert_eq!(hits.len(), 3);
+    assert!((hits[0].score - 1.0).abs() < 0.01, "{}", hits[0].score);
+    assert!(
+        (hits[1].score - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
+        "{}",
+        hits[1].score
+    );
+    assert!(hits[2].score.abs() < 0.01, "{}", hits[2].score);
+}
+
+/// A nearest-neighbour search always has a nearest. The floor is what lets it
+/// answer "nothing here is about that" instead.
+#[test]
+fn a_passage_further_than_the_floor_is_not_returned() {
+    let connection = with_vectors();
+
+    let close = index::search_similar(&connection, &[1., 0.], 10, 0.25).expect("a search");
+    assert_eq!(close.len(), 2, "the right-angled passage came back");
+
+    let nothing = index::search_similar(&connection, &[0., -1.], 10, 0.25).expect("a search");
+    assert!(nothing.is_empty(), "{nothing:?}");
+}
+
+/// A library whose vectors were built before the metric was asked for holds
+/// distances that mean something else. Reading them as cosines would rank the
+/// book backwards, so the table is rebuilt rather than reused.
+#[test]
+fn a_table_built_for_another_metric_is_rebuilt() {
+    let connection = library();
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE chunks_vec USING vec0(
+                chunk_id TEXT PRIMARY KEY,
+                embedding float[2]
+            )",
+        )
+        .expect("a table measuring in L2");
+
+    index::create_vectors(&connection, 2).expect("a vector table");
+
+    let sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'chunks_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("a declaration");
+    assert!(sql.contains("distance_metric=cosine"), "{sql}");
 }

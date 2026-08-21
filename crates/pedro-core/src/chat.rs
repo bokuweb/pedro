@@ -17,8 +17,14 @@ use pedro_agent::{AgentError, AgentEvent, Cancellation, DiscoveredAgent, Prompt}
 use crate::citation::{BookText, parse_citations};
 use crate::excerpt::select_excerpts;
 use crate::model::{ChatMessage, Role};
-use crate::prompt::{Passage, Turn, build_conversation, build_system_prompt};
+use crate::prompt::{Passage, Retrieved, Turn, build_conversation, build_system_prompt};
 use crate::store::{Store, StoreError};
+
+/// How many passages a search may add to a question.
+///
+/// Enough that a question about two ends of a book has both, few enough that
+/// the passages the reader actually marked are still the bulk of what is read.
+const RETRIEVED: usize = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
@@ -99,7 +105,26 @@ pub fn prepare(store: &Store, question: &Question) -> Result<Asked, ChatError> {
         .collect();
 
     let excerpts = select_excerpts(&full_text, &pages, &book.outline);
-    let system = build_system_prompt(&excerpts, &passages, question.web_search);
+
+    // What the marked passages are near is one kind of context; what the
+    // question itself is about is another. A book is searched for the question
+    // and whatever that turns up outside the excerpt is added, because the
+    // answer to "how does this square with chapter 20" is in chapter 20.
+    let retrieved = store
+        .passages_for(&book.id, &question.text, RETRIEVED)?
+        .into_iter()
+        .filter(|hit| {
+            !excerpts
+                .iter()
+                .any(|excerpt| (excerpt.start_page..=excerpt.end_page).contains(&hit.page_number))
+        })
+        .map(|hit| Retrieved {
+            page: hit.page_number,
+            text: hit.text,
+        })
+        .collect::<Vec<_>>();
+
+    let system = build_system_prompt(&excerpts, &passages, &retrieved, question.web_search);
 
     let history: Vec<Turn> = store
         .messages(&highlight.id)?

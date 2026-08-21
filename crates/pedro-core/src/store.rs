@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use pedro_pdf::{Document, OutlineItem, PdfError};
-use pedro_search::index;
+use pedro_search::{index, tokenize};
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
@@ -59,16 +59,39 @@ pub enum StoreError {
 pub struct Store {
     root: PathBuf,
     connection: Connection,
+    /// The model that turns a passage into a vector, when it has been fetched.
+    ///
+    /// Optional on purpose: everything works without it, and searching by
+    /// meaning is what it adds. See `scripts/fetch-embedding.sh`.
+    embedder: Option<pedro_search::Embedder>,
 }
 
 /// How many passages a search returns before anyone asks for fewer.
 const SEARCH_LIMIT: usize = 40;
+
+/// How alike a passage has to be before it counts as being about the query.
+///
+/// Measured rather than picked: with this model a question and a passage that
+/// answers it score between 0.43 and 0.81, and a question against text on
+/// another subject scores 0.06 and below
+/// (`cargo run -p pedro-search --example similarity`). The floor sits in the
+/// gap, far enough from both ends that a near miss on either side of it is
+/// still the right call.
+const RELATED: f32 = 0.25;
+
+/// How much of a question a passage has to contain before its words alone are
+/// reason enough to attach it. See [`Store::passages_for`].
+const COVERED: f32 = 0.5;
 
 impl Store {
     /// Opens the library under `root`, creating it if it is not there yet.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let root = root.into();
         std::fs::create_dir_all(root.join(DOCUMENTS))?;
+
+        // Before the connection is opened: the vector index is an extension,
+        // and a connection only has it if it was registered first.
+        index::prepare();
 
         let connection = Connection::open(root.join(DATABASE))?;
         // Deleting a book has to take its highlights and their conversations
@@ -80,7 +103,16 @@ impl Store {
 
         migrate(&connection)?;
 
-        Ok(Self { root, connection })
+        let embedder = pedro_search::Embedder::find();
+        if let Some(embedder) = &embedder {
+            index::create_vectors(&connection, embedder.dimensions())?;
+        }
+
+        Ok(Self {
+            root,
+            connection,
+            embedder,
+        })
     }
 
     /// Opens the library where the platform keeps application data.
@@ -167,22 +199,51 @@ impl Store {
     /// transaction, so it happens on the same thread that just read the book.
     pub fn index_book(&mut self, book_id: &str, full_text: &str) -> Result<(), StoreError> {
         let chunks = pedro_search::chunk::split(full_text, crate::excerpt::PAGE_DELIMITER);
-        index::index_book(&mut self.connection, book_id, &chunks)?;
+        let ids = index::index_book(&mut self.connection, book_id, &chunks)?;
 
-        tracing::info!(book_id, passages = chunks.len(), "indexed a book");
+        // The words are indexed whatever happens; the meanings only when the
+        // model to read them with is present.
+        let embedded = match &self.embedder {
+            Some(embedder) => {
+                let texts: Vec<String> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
+                match embedder.embed_all(&texts) {
+                    Ok(vectors) => {
+                        index::index_vectors(&mut self.connection, &ids, &vectors)?;
+                        true
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, book_id, "could not embed a book");
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
+
+        tracing::info!(book_id, passages = chunks.len(), embedded, "indexed a book");
         Ok(())
     }
 
     /// Indexes the books added before there was an index to put them in.
     ///
     /// Returns how many it did. Called at startup, where finding nothing to do
-    /// is the usual answer and costs one query per book.
+    /// is the usual answer and costs a query or two per book.
+    ///
+    /// A book counts as missing when its words are not indexed, and also when
+    /// its words are but its meanings are not — which is every book in a
+    /// library that was read before the model was downloaded. Without the
+    /// second test those books would keep their keyword search and never gain
+    /// the other kind, with nothing on screen to say why.
     pub fn index_missing(&mut self) -> Result<usize, StoreError> {
         let books = self.books()?;
+        let embedder = self.embedder.is_some();
         let mut done = 0;
 
         for book in books {
-            if index::is_indexed(&self.connection, &book.id)? {
+            let words = index::is_indexed(&self.connection, &book.id)?;
+            let meanings = index::has_vectors_for(&self.connection, &book.id)?;
+
+            if words && (meanings || !embedder) {
                 continue;
             }
 
@@ -195,8 +256,89 @@ impl Store {
     }
 
     /// The passages matching `query`, across every book, best first.
+    ///
+    /// Both ways of looking when there is a model to look the second way with:
+    /// the words the reader typed, and what those words mean. Their scores are
+    /// not comparable, so the two rankings are fused by position rather than
+    /// by score.
     pub fn search(&self, query: &str) -> Result<Vec<pedro_search::Hit>, StoreError> {
-        Ok(index::search(&self.connection, query, SEARCH_LIMIT)?)
+        let words = index::search(&self.connection, query, SEARCH_LIMIT)?;
+        let meaning = self.by_meaning(query)?;
+
+        if meaning.is_empty() {
+            return Ok(words);
+        }
+
+        Ok(pedro_search::fuse::reciprocal_rank(
+            &[words, meaning],
+            SEARCH_LIMIT,
+        ))
+    }
+
+    /// The passages of one book that bear on `question`, best first.
+    ///
+    /// What a question is answered from beyond the pages the reader marked:
+    /// the book is searched for the question itself, and what it finds is
+    /// attached to the prompt.
+    ///
+    /// Held to a higher bar than the search box is. A search box that returns
+    /// something loosely related costs the reader a glance, and they can see
+    /// for themselves that it is not what they meant; the same passage in a
+    /// prompt is indistinguishable, to whatever is reading it, from a passage
+    /// that answers the question. So a passage joins the context only if it
+    /// means something like the question — the vector floor — or actually
+    /// contains a fair part of it. Turning up nothing is a fine answer here,
+    /// and the marked pages are still sent.
+    pub fn passages_for(
+        &self,
+        book_id: &str,
+        question: &str,
+        limit: usize,
+    ) -> Result<Vec<pedro_search::Hit>, StoreError> {
+        let meaning = self.by_meaning(question)?;
+        let known: std::collections::HashSet<&str> =
+            meaning.iter().map(|hit| hit.text.as_str()).collect();
+
+        let words = index::search(&self.connection, question, SEARCH_LIMIT)?
+            .into_iter()
+            .filter(|hit| !known.contains(hit.text.as_str()))
+            .filter(|hit| tokenize::coverage(question, &hit.text) >= COVERED)
+            .collect();
+
+        Ok(pedro_search::fuse::reciprocal_rank(&[words, meaning], limit)
+            .into_iter()
+            .filter(|hit| hit.book_id == book_id)
+            .take(limit)
+            .collect())
+    }
+
+    /// The passages that mean something like `query`, or none when there is no
+    /// model to judge that with.
+    fn by_meaning(&self, query: &str) -> Result<Vec<pedro_search::Hit>, StoreError> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(Vec::new());
+        };
+        if !index::has_vectors(&self.connection) {
+            return Ok(Vec::new());
+        }
+
+        match embedder.embed(query) {
+            Ok(vector) => Ok(index::search_similar(
+                &self.connection,
+                &vector,
+                SEARCH_LIMIT,
+                RELATED,
+            )?),
+            Err(err) => {
+                tracing::warn!(?err, "could not embed the query");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Whether searching by meaning is available.
+    pub fn can_search_by_meaning(&self) -> bool {
+        self.embedder.is_some() && index::has_vectors(&self.connection)
     }
 
     /// Every book, most recently touched first.
