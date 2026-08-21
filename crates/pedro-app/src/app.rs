@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
@@ -65,10 +65,12 @@ fn sign_in_command(err: &pedro_core::chat::ChatError) -> Option<&'static str> {
 /// continuous zoom would rasterise a new page for every step of the way.
 const ZOOM_STEPS: [f32; 7] = [0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 
-/// How often an answer that is still arriving is redrawn. Fast enough to read
-/// as writing rather than as pasting, slow enough that the markdown behind it
-/// is parsed twenty times a second rather than once per token.
-const ANSWER_FRAME: Duration = Duration::from_millis(50);
+/// How often the answer on screen catches up with the answer that has arrived.
+///
+/// An agent does not deliver evenly — a hundred characters at once, then a
+/// second of nothing — and drawing exactly what arrived puts that unevenness on
+/// screen. Showing a little more on a steady beat turns arrival into writing.
+const ANSWER_FRAME: Duration = Duration::from_millis(33);
 
 pub struct Pedro {
     focus_handle: FocusHandle,
@@ -97,8 +99,8 @@ pub struct Pedro {
     pub(crate) answering: Option<pedro_agent::AgentKind>,
     /// How large a page is drawn, as a multiple of [`PAGE_HEIGHT`].
     pub(crate) zoom: f32,
-    /// When the answer being written was last drawn.
-    drawn_answer_at: Instant,
+    /// Whether the beat that walks an answer onto the screen is running.
+    revealing: bool,
     /// The row whose remove button has been pressed once.
     ///
     /// Removing a book takes its highlights and conversations with it, so it
@@ -167,7 +169,7 @@ impl Pedro {
             show_secondary: false,
             answering: None,
             zoom: 1.0,
-            drawn_answer_at: Instant::now(),
+            revealing: false,
             confirming_removal: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
@@ -1259,15 +1261,40 @@ impl Pedro {
         };
 
         chat.streaming.push_str(delta);
+        self.keep_revealing(cx);
+    }
 
-        // Tokens arrive faster than anyone reads them, and every frame parses
-        // the answer so far as markdown. Drawing on a fixed rhythm keeps that
-        // work proportional to the time the answer takes rather than to the
-        // number of pieces it arrives in.
-        if self.drawn_answer_at.elapsed() >= ANSWER_FRAME {
-            self.drawn_answer_at = Instant::now();
-            cx.notify();
+    /// Runs the beat that walks the answer onto the screen.
+    ///
+    /// One at a time: the loop keeps itself alive while anything is hidden and
+    /// stops when it has caught up, and starting a second would double the
+    /// rate.
+    fn keep_revealing(&mut self, cx: &mut Context<Self>) {
+        if self.revealing {
+            return;
         }
+
+        self.revealing = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ANSWER_FRAME).await;
+
+                let more = this.update(cx, |this, cx| {
+                    let more = this.chat.as_mut().is_some_and(|chat| chat.reveal_more());
+
+                    cx.notify();
+                    this.revealing = more;
+                    more
+                });
+
+                match more {
+                    Ok(true) => continue,
+                    // Either everything is on screen, or the window is gone.
+                    _ => break,
+                }
+            }
+        })
+        .detach();
     }
 
     fn answered(
@@ -1275,8 +1302,6 @@ impl Pedro {
         finished: Result<Vec<ChatMessage>, (String, Option<&'static str>)>,
         cx: &mut Context<Self>,
     ) {
-        self.drawn_answer_at = Instant::now();
-
         if let Some(chat) = &mut self.chat {
             match finished {
                 Ok(messages) => {
@@ -1367,9 +1392,13 @@ impl Pedro {
     }
 
     /// Stops an answer that is still being written.
+    ///
+    /// What has already arrived is shown in full rather than left half-drawn:
+    /// the reader asked for it to stop, not for it to be hidden.
     pub(crate) fn stop_answering(&mut self, cx: &mut Context<Self>) {
-        if let Some(chat) = &self.chat {
+        if let Some(chat) = &mut self.chat {
             chat.cancellation.cancel();
+            chat.reveal_everything();
             cx.notify();
         }
     }

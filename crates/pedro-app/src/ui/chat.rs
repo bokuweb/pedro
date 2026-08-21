@@ -66,7 +66,7 @@ impl Pedro {
                             render_bubble("pending", Role::User, question, Vec::new(), window, cx)
                         }))
                         .when(chat.is_answering(), |this| {
-                            this.child(render_answer_in_progress(&chat.streaming, window, cx))
+                            this.child(render_answer_in_progress(chat.visible(), window, cx))
                         })
                         .children(
                             chat.error
