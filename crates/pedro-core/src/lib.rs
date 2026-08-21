@@ -15,7 +15,7 @@ pub mod model;
 pub mod prompt;
 pub mod store;
 
-pub use chat::{ChatError, Question, ask};
+pub use chat::{Asked, ChatError, Question, ask, prepare, record};
 pub use citation::{BookText, Citation, CitationKind, PageLocation, PageMiss};
 pub use excerpt::{Excerpt, PAGE_DELIMITER, select_excerpt};
 pub use model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};

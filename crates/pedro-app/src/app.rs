@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use gpui::{
@@ -18,9 +19,9 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
+use pedro_core::chat::{Question, prepare, record, run};
 use pedro_core::model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};
 use pedro_core::store::Store;
-use pedro_core::{Question, ask};
 use pedro_pdf::{Document, PageSize};
 
 use crate::chat::Conversation;
@@ -64,6 +65,11 @@ fn sign_in_command(err: &pedro_core::chat::ChatError) -> Option<&'static str> {
 /// continuous zoom would rasterise a new page for every step of the way.
 const ZOOM_STEPS: [f32; 7] = [0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 
+/// How often an answer that is still arriving is redrawn. Fast enough to read
+/// as writing rather than as pasting, slow enough that the markdown behind it
+/// is parsed twenty times a second rather than once per token.
+const ANSWER_FRAME: Duration = Duration::from_millis(50);
+
 pub struct Pedro {
     focus_handle: FocusHandle,
     pub(crate) search: Entity<InputState>,
@@ -91,6 +97,8 @@ pub struct Pedro {
     pub(crate) answering: Option<pedro_agent::AgentKind>,
     /// How large a page is drawn, as a multiple of [`PAGE_HEIGHT`].
     pub(crate) zoom: f32,
+    /// When the answer being written was last drawn.
+    drawn_answer_at: Instant,
     /// The row whose remove button has been pressed once.
     ///
     /// Removing a book takes its highlights and conversations with it, so it
@@ -159,6 +167,7 @@ impl Pedro {
             show_secondary: false,
             answering: None,
             zoom: 1.0,
+            drawn_answer_at: Instant::now(),
             confirming_removal: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             page_scroll: UniformListScrollHandle::new(),
@@ -1065,33 +1074,72 @@ impl Pedro {
         let (deltas, mut arriving) = futures::channel::mpsc::unbounded::<String>();
 
         let answering = cx.background_executor().spawn(async move {
-            let store = store.lock();
-            let stored = store
-                .add_highlight(&book_id, highlight)
-                .map_err(|err| (err.to_string(), None))?;
+            // Three phases, and the store is held for two of them. An agent
+            // takes as long as it takes; holding a single connection across
+            // that would stop every page rendering and every place being
+            // saved, because those run on this same pool.
+            let asked = {
+                let store = store.lock();
+                let stored = store
+                    .add_highlight(&book_id, highlight)
+                    .map_err(|err| (err.to_string(), None))?;
 
-            let answer = ask(
-                &store,
-                &agent,
-                &Question {
-                    highlight_id: stored.id.clone(),
-                    text: question,
-                    web_search,
-                },
-                &cancellation,
-                &mut |delta| {
-                    // A closed receiver means the reader moved on; the run is
-                    // left to finish and store its answer regardless.
-                    let _ = deltas.unbounded_send(delta.to_owned());
-                },
+                prepare(
+                    &store,
+                    &Question {
+                        highlight_id: stored.id,
+                        text: question,
+                        web_search,
+                    },
+                )
+                .map_err(|err| (err.to_string(), sign_in_command(&err)))?
+            };
+
+            tracing::info!(
+                agent = agent.kind.display_name(),
+                turns = asked.prompt.turns.len(),
+                context = asked.prompt.system.len(),
+                "asking"
             );
 
-            match answer {
-                Ok(_) => store
-                    .messages(&stored.id)
-                    .map_err(|err| (err.to_string(), None)),
-                Err(err) => Err((err.to_string(), sign_in_command(&err))),
-            }
+            let started = std::time::Instant::now();
+            let mut pieces = 0usize;
+            let answer = run(&agent, &asked, &cancellation, &mut |delta| {
+                pieces += 1;
+                // A closed receiver means the reader moved on; the run is
+                // left to finish and store its answer regardless.
+                let _ = deltas.unbounded_send(delta.to_owned());
+            })
+            .inspect(|answer| {
+                tracing::info!(
+                    seconds = started.elapsed().as_secs_f32(),
+                    pieces,
+                    characters = answer.len(),
+                    "answered"
+                );
+            })
+            .inspect_err(|err| {
+                tracing::warn!(
+                    seconds = started.elapsed().as_secs_f32(),
+                    pieces,
+                    %err,
+                    "the agent did not answer"
+                );
+            })
+            .map_err(|err| {
+                let sign_in = match &err {
+                    pedro_agent::AgentError::NotSignedIn { command, .. } => Some(*command),
+                    _ => None,
+                };
+
+                (err.to_string(), sign_in)
+            })?;
+
+            let store = store.lock();
+            record(&store, &asked, &answer).map_err(|err| (err.to_string(), None))?;
+            store
+                .messages(&asked.highlight_id)
+                .map_err(|err| (err.to_string(), None))
         });
 
         cx.spawn(async move |this, cx| {
@@ -1206,8 +1254,18 @@ impl Pedro {
     }
 
     fn answer_arriving(&mut self, delta: &str, cx: &mut Context<Self>) {
-        if let Some(chat) = &mut self.chat {
-            chat.streaming.push_str(delta);
+        let Some(chat) = &mut self.chat else {
+            return;
+        };
+
+        chat.streaming.push_str(delta);
+
+        // Tokens arrive faster than anyone reads them, and every frame parses
+        // the answer so far as markdown. Drawing on a fixed rhythm keeps that
+        // work proportional to the time the answer takes rather than to the
+        // number of pieces it arrives in.
+        if self.drawn_answer_at.elapsed() >= ANSWER_FRAME {
+            self.drawn_answer_at = Instant::now();
             cx.notify();
         }
     }
@@ -1217,6 +1275,8 @@ impl Pedro {
         finished: Result<Vec<ChatMessage>, (String, Option<&'static str>)>,
         cx: &mut Context<Self>,
     ) {
+        self.drawn_answer_at = Instant::now();
+
         if let Some(chat) = &mut self.chat {
             match finished {
                 Ok(messages) => {

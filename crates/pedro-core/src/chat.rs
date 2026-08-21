@@ -5,9 +5,12 @@
 //! conversation, an installed CLI answers it, and the sources it names become
 //! pages the reader can jump back to.
 //!
-//! chatbook does this in a Worker with an API key. The only real difference
-//! here is who answers — and that the whole exchange is rows on the reader's
-//! own disk.
+//! It comes in three parts on purpose. The store is a single connection behind
+//! a lock, and an agent takes as long as it takes — a minute is ordinary. Doing
+//! all of it under one borrow of the store would stop the reader turning a page
+//! for that whole minute. So the store is read, the agent runs with nothing
+//! held, and the store is written: [`prepare`], the run, [`record`]. [`ask`] is
+//! the three in a row, for callers with nothing else to do meanwhile.
 
 use pedro_agent::{AgentError, AgentEvent, Cancellation, DiscoveredAgent, Prompt};
 
@@ -43,25 +46,23 @@ pub struct Question {
     pub web_search: bool,
 }
 
-/// Asks `agent` about a highlighted passage and stores both turns.
+/// A question that has been read out of the store and is ready to be asked.
 ///
-/// `on_delta` is called with each piece of the answer as it arrives, so the
-/// reader watches it being written; the stored message is returned when it is
-/// finished.
+/// Carries the book's text along with the prompt because the answer's sources
+/// are looked up in it, and looking them up must not need the store again.
+pub struct Asked {
+    pub highlight_id: String,
+    pub prompt: Prompt,
+    full_text: String,
+    page_count: u32,
+}
+
+/// Reads everything a question needs, and records the question itself.
 ///
 /// The question is stored before the agent is asked. An answer that fails
 /// therefore leaves the question in the conversation, which is the honest
 /// record: the reader did ask, and can ask again without retyping it.
-///
-/// Blocking from start to finish — it runs a subprocess — so it belongs on a
-/// background thread.
-pub fn ask(
-    store: &Store,
-    agent: &DiscoveredAgent,
-    question: &Question,
-    cancellation: &Cancellation,
-    on_delta: &mut dyn FnMut(&str),
-) -> Result<ChatMessage, ChatError> {
+pub fn prepare(store: &Store, question: &Question) -> Result<Asked, ChatError> {
     let highlight = store
         .highlight(&question.highlight_id)?
         .ok_or_else(|| ChatError::NoSuchHighlight(question.highlight_id.clone()))?;
@@ -84,30 +85,68 @@ pub fn ask(
 
     store.add_message(&highlight.id, Role::User, &question.text, &[])?;
 
-    let prompt = Prompt {
-        system,
-        turns: build_conversation(&history, &question.text),
-        web_search: question.web_search,
-        workspace: Some(store.root().to_path_buf()),
-    };
+    Ok(Asked {
+        highlight_id: highlight.id,
+        prompt: Prompt {
+            system,
+            turns: build_conversation(&history, &question.text),
+            web_search: question.web_search,
+            workspace: Some(store.root().to_path_buf()),
+        },
+        full_text,
+        page_count: book.page_count,
+    })
+}
 
-    let answer = pedro_agent::run(agent, &prompt, cancellation, &mut |event| {
-        if let AgentEvent::Delta(text) = &event {
-            on_delta(text);
-        }
-    })?;
-
-    // The citations are resolved against the whole book rather than the
-    // excerpt: the excerpt is a verbatim run of its pages, so a passage quoted
-    // from it is in the book too, and looking in the book is what turns it into
-    // a page number the reader can jump to.
+/// Stores an answer with its sources resolved to pages.
+///
+/// The citations are resolved against the whole book rather than the excerpt:
+/// the excerpt is a verbatim run of its pages, so a passage quoted from it is
+/// in the book too, and looking in the book is what turns it into a page number
+/// the reader can jump to.
+pub fn record(store: &Store, asked: &Asked, answer: &str) -> Result<ChatMessage, ChatError> {
     let citations = parse_citations(
-        &answer,
+        answer,
         Some(BookText {
-            full_text: &full_text,
-            page_count: book.page_count,
+            full_text: &asked.full_text,
+            page_count: asked.page_count,
         }),
     );
 
-    Ok(store.add_message(&highlight.id, Role::Assistant, &answer, &citations)?)
+    Ok(store.add_message(&asked.highlight_id, Role::Assistant, answer, &citations)?)
+}
+
+/// Asks `agent` about a highlighted passage and stores both turns.
+///
+/// `on_delta` is called with each piece of the answer as it arrives, so the
+/// reader watches it being written; the stored message is returned when it is
+/// finished.
+///
+/// Holds `store` throughout, so a caller that has other uses for it should run
+/// the three parts itself rather than calling this.
+pub fn ask(
+    store: &Store,
+    agent: &DiscoveredAgent,
+    question: &Question,
+    cancellation: &Cancellation,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<ChatMessage, ChatError> {
+    let asked = prepare(store, question)?;
+    let answer = run(agent, &asked, cancellation, on_delta)?;
+
+    record(store, &asked, &answer)
+}
+
+/// Puts the question to the agent. Touches no store.
+pub fn run(
+    agent: &DiscoveredAgent,
+    asked: &Asked,
+    cancellation: &Cancellation,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<String, AgentError> {
+    pedro_agent::run(agent, &asked.prompt, cancellation, &mut |event| {
+        if let AgentEvent::Delta(text) = &event {
+            on_delta(text);
+        }
+    })
 }
