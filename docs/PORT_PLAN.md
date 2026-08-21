@@ -1,0 +1,198 @@
+# Porting chatbook to a native GPUI application
+
+- Kind: implementation plan
+- Scope: what pedro has to grow to be [chatbook](https://github.com/skanehira/chatbook)
+  without a server, and in which order
+- Last updated: 2026-08-20
+
+chatbook is a self-hosted PDF reader: you drag-select a passage of a technical
+book, ask about it, and the answer streams back with citations that resolve to
+page numbers you can jump to. It runs on Cloudflare — React in the browser,
+Hono on Workers, D1 for metadata, R2 for the files, an OpenAI-compatible API
+for the answers.
+
+Pedro is the same reader as a native macOS application, with every one of those
+four remote pieces replaced by something local:
+
+| chatbook | pedro |
+| --- | --- |
+| React + pdf.js in a browser | GPUI + pdfium |
+| D1 (SQLite over HTTP) | SQLite on disk |
+| R2 | files under the application support directory |
+| OpenAI-compatible API + `LLM_API_KEY` | an agent CLI already installed and authenticated |
+| login, sessions, `AUTH_*` secrets | nothing — the desktop account is the boundary |
+
+The last row is what makes this worth porting rather than deploying: chatbook's
+single-user design, its login, and its "bring your own API key" requirement are
+all consequences of being a web app. A desktop app owned by one person needs
+none of them, and — following [waku](https://github.com/egoist/waku) — it can
+borrow the credentials of a coding agent CLI the user has already installed
+instead of asking for a key at all.
+
+## The decisions this plan makes
+
+### PDF: pdfium, loaded dynamically
+
+The README left this open between `pdfium-render` and a `wry` webview running
+pdf.js. It is settled here as **pdfium-render**, because a `wry` webview always
+composites above GPUI content and cannot be clipped: the selection popover, the
+highlight overlay and the chat panel are all things that have to sit over the
+page, and none of them could. Everything pdf.js gives chatbook for free — page
+rasterisation, per-character boxes for selection, the outline — pdfium exposes
+too, only as an API rather than as DOM.
+
+pdfium ships as a shared library rather than a crate. `scripts/fetch-pdfium.sh`
+downloads a prebuilt one; `pedro-pdf` binds to it at runtime, looking at
+`PEDRO_PDFIUM_PATH`, then `vendor/pdfium/lib`, then next to the executable,
+then the system library. No build-time linkage, so a machine without the
+library still builds and only fails when a document is opened.
+
+### Storage: SQLite plus a content-addressed file store
+
+`~/Library/Application Support/pedro/`:
+
+```
+pedro.sqlite3        library, highlights, conversations, reading positions
+documents/<sha256>.pdf
+```
+
+Keying the file by the SHA-256 of its bytes reproduces chatbook's most useful
+property directly: adding the same book twice is the same book, so reading
+position and highlights survive re-adding it, and re-adding it under a new
+filename only renames it. The schema follows chatbook's D1 schema closely
+enough that its migrations remain readable as documentation of ours.
+
+### The model: a local CLI, not an API key
+
+`pedro-agent` already finds `claude` and `codex`. It grows the other half:
+running one and reading its answer as a stream of events.
+
+Both CLIs have a non-interactive JSONL mode, and their event shapes were
+recorded from the installed versions rather than guessed:
+
+```
+claude -p --output-format stream-json --include-partial-messages --verbose
+  {"type":"system","subtype":"init","session_id":…}
+  {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":…}}}
+  {"type":"assistant","message":{"content":[{"type":"text","text":…}],"usage":{…}}}
+  {"type":"result","subtype":"success","is_error":false,"result":…,"usage":{…}}
+
+codex exec --json
+  {"type":"thread.started","thread_id":…}
+  {"type":"turn.started"}
+  {"type":"item.completed","item":{"type":"agent_message","text":…}}
+  {"type":"turn.completed","usage":{…}}
+  {"type":"turn.failed","error":{"message":…}}
+```
+
+Two shapes, one `AgentEvent` stream: `Started`, `Delta`, `Message`, `Finished`,
+`Failed`. The parser is deliberately forgiving — an unrecognised line is
+skipped, not an error — because these formats move between CLI releases and a
+reader must not stop working when one of them adds a field.
+
+Consequences worth stating plainly:
+
+- **The conversation is ours, not the CLI's.** Every request sends the system
+  prompt, the stored turns and the new question, and no CLI session is resumed.
+  It costs a little more per turn than resuming would, and in exchange the
+  history is the rows in our database rather than state inside someone else's
+  process, and the same code drives both CLIs.
+- **Tools are off.** `claude --tools ""` for a plain answer, `--tools WebSearch`
+  when the reader has web search on. This is the port of chatbook's web-search
+  toggle: the capability comes from the CLI rather than from a `web_search`
+  tool on a Responses API.
+- **`is_error` is not `subtype`.** `claude` reports "Not logged in" as
+  `{"subtype":"success","is_error":true}`. The runner reads `is_error`.
+
+## Layout
+
+```
+crates/
+  pedro-agent   discovery (done) + invocation of the agent CLIs
+  pedro-pdf     pdfium: pages, rasterisation, text with per-character boxes, outline
+  pedro-core    the domain: store, library, excerpts, citations, chat
+  pedro-app     the GPUI application
+```
+
+Only `pedro-app` depends on GPUI. That split is what lets the ported logic —
+which is where chatbook's real thinking is — be covered by tests that run
+without a window, and it is also what makes the port verifiable on a machine
+that cannot yet compile GPUI (see "Verification" below).
+
+## Order of work
+
+Each step leaves the workspace building and tested.
+
+1. ✅ **Workspace** — `pedro-pdf` and `pedro-core`, the pdfium fetch script,
+   the application support directory.
+2. ✅ **`pedro-pdf`** — open a document, page count and sizes, rasterise a page
+   at a scale, extract page text plus per-character rectangles, read the
+   outline. Text extraction produces the `\f`-delimited full text chatbook
+   stores, so the ported citation lookup works on it unchanged.
+3. ✅ **`pedro-core`, storage** — the SQLite schema, adding a document
+   (hash, dedup, page count, full text, outline), listing the library, deleting
+   a book with its highlights and conversations, reading position.
+4. ✅ **`pedro-core`, the ported logic** — `selectExcerpt` (chapter bounds, the
+   ±10 page fallback), `buildSystemPrompt`, `buildConversation`/`stripSources`,
+   `parseCitations` and `findPageNumber` (whole-quote, page-straddling, and
+   fragment matching). A direct port, test for test.
+5. ✅ **`pedro-agent`, invocation** — spawn, stream, cancel, plus the two event
+   parsers and the tool/web-search options.
+6. ✅ **`pedro-core`, chat** — 4 and 5 together: a question about a highlight
+   becomes a system prompt, a conversation, a stream of tokens, and finally a
+   stored answer with resolved citations. Runnable as
+   `cargo run -p pedro-core --example ask`.
+7. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
+   continuous scroll, selection and highlights, chat panel with streaming and
+   citations, contents, settings, and the keys for turning and zooming. Vim and
+   Emacs bindings and two-page spreads are the parts of step 7 still open.
+
+Steps 1–6 have no GPUI dependency. The workspace is covered by 173 tests, all of
+which run without an agent CLI, a network, or a window.
+
+## What building it turned up
+
+Four things were found by running the code rather than by reading about it, and
+each shaped the design:
+
+- **pdfium aborts the process when two threads are inside it at once**, with or
+  without pdfium-render's `thread_safe` feature. `pedro-pdf` therefore takes a
+  process-wide lock for the duration of every call, so callers cannot get this
+  wrong; its own test binary runs in parallel as the check that the lock works.
+- **Killing an agent CLI does not kill what it started.** The installed
+  `claude` is a script around a node process, which kept the pipe open and left
+  a cancelled question hanging for as long as the run would have taken. The CLI
+  is now started in a process group of its own and the group is signalled, which
+  took one cancellation test from 30 seconds to 0.1.
+- **A page has two coordinate spaces and pdfium answers in both.** It
+  rasterises the crop box and reports characters in media box coordinates. A
+  printed book is inset from one to the other, so every mark landed a line above
+  its words. Only rendering the page and counting ink inside the box a character
+  claimed could settle it; that check is now a test, and
+  `cargo run -p pedro-pdf --example boxes` is the tool that found it.
+- **Layout state has to be recorded when a frame is painted, not when it is
+  laid out.** A scrolling list lays its rows out in its own space and translates
+  them on the way to the screen, so bounds taken during layout are in neither
+  the space the mouse is reported in nor the space the page is drawn in.
+
+## Deliberately not ported
+
+- **Login and sessions.** No `AUTH_*`, no cookies, no revocation story.
+- **Multi-device sync.** chatbook's "continue on your phone" comes from the
+  server being the source of truth. Pedro's reading position is local.
+- **Mobile layout.** The touch selection bar, the chat sheet, the single-column
+  breakpoint: all of it exists to serve a phone browser.
+- **Token accounting columns.** chatbook records what each answer cost because
+  the reader pays per token. A CLI on a subscription does not report a
+  comparable number, so the columns are left out rather than filled with zeros.
+
+## Verification
+
+`pedro-agent`, `pedro-pdf` and `pedro-core` build and test with the Command
+Line Tools alone. `pedro-app` needs a full Xcode install, because GPUI compiles
+Metal shaders with `xcrun metal` during its build (see the README). Steps 1–6
+are therefore verified as they land; step 7 waits for Xcode.
+
+Nothing in the test suite needs an agent CLI or a network: runs are exercised
+against a stand-in that prints recorded JSONL, and the recordings are taken
+from the installed `claude` and `codex` rather than written from memory.

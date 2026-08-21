@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/pedro-agent",
+    "crates/pedro-app",
+    "crates/pedro-core",
+    "crates/pedro-pdf",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/bokuweb/pedro"
+
+[workspace.dependencies]
+pedro-agent = { path = "crates/pedro-agent" }
+pedro-core = { path = "crates/pedro-core" }
+pedro-pdf = { path = "crates/pedro-pdf" }
+
+anyhow = "1"
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+# GPUI pulls in a lot of heavy transitive code. Optimizing dependencies keeps
+# debug builds usable without slowing down iteration on our own crates.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2

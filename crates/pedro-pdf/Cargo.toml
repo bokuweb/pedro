@@ -1,0 +1,23 @@
+[package]
+name = "pedro-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Page rendering, text extraction and outlines, on top of pdfium."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# `image_latest` is in the default feature set only to convert bitmaps into the
+# `image` crate's types. Pages go straight to the GPU as raw RGBA here, so the
+# whole dependency is left out.
+pdfium-render = { version = "0.9.3", default-features = false, features = [
+    "pdfium_latest",
+    "thread_safe",
+] }
+
+[dev-dependencies]
+image = "0.25"

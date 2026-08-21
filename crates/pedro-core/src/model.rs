@@ -1,0 +1,91 @@
+//! What the reader accumulates: books, the passages marked in them, and the
+//! conversations those passages started.
+
+use pedro_pdf::{OutlineItem, Rect};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+use crate::citation::Citation;
+
+pub use pedro_agent::Role;
+
+/// A book in the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Book {
+    pub id: String,
+    /// What to call it. Follows the file it was last added from, so re-adding
+    /// a book under a better name renames it.
+    pub file_name: String,
+    /// SHA-256 of the file's bytes, and the name of the stored copy.
+    ///
+    /// Identity is the content, not the path: adding the same book twice is
+    /// the same book, so its highlights and its place survive re-adding it.
+    pub file_hash: String,
+    pub page_count: u32,
+    /// Top-level chapters, empty when the book ships no outline.
+    pub outline: Vec<OutlineItem>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    /// Where the reader left off, absent on a book nobody has opened.
+    pub reading: Option<ReadingState>,
+}
+
+/// Where the reader left off, and how the panels sat around it.
+///
+/// The panels are `Option` because "nobody has said either way" is different
+/// from "closed": a book opened once with the chat panel never touched should
+/// open the way the reader's last book did, not folded shut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadingState {
+    pub page: u32,
+    /// The conversation that was open, so it comes back with the page.
+    pub highlight_id: Option<String>,
+    pub outline_open: Option<bool>,
+    pub chat_panel_open: Option<bool>,
+}
+
+/// A passage the reader marked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    pub id: String,
+    pub book_id: String,
+    pub selected_text: String,
+    pub page_number: u32,
+    /// One rectangle per line of the passage, as fractions of the page.
+    pub rects: Vec<Rect>,
+    pub color: String,
+    pub created_at: OffsetDateTime,
+}
+
+/// A passage on its way to being stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewHighlight {
+    pub selected_text: String,
+    pub page_number: u32,
+    pub rects: Vec<Rect>,
+}
+
+/// The colour a highlight gets when nothing else is asked for. chatbook's.
+pub const DEFAULT_HIGHLIGHT_COLOR: &str = "#FFEB3B";
+
+/// One turn of the conversation about a highlight, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatMessage {
+    pub id: String,
+    pub highlight_id: String,
+    pub role: Role,
+    /// The answer as the agent wrote it, `## Sources` section and all. The
+    /// section is dropped when it is shown and when it is sent back as
+    /// history, but it is kept here: it is the record of what was said.
+    pub content: String,
+    pub citations: Vec<Citation>,
+    pub created_at: OffsetDateTime,
+}
+
+/// How pages are laid out in the reader, remembered per book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageLayout {
+    Single,
+    Spread,
+}
