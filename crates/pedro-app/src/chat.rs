@@ -209,6 +209,22 @@ impl Conversation {
         self.revealed < arrived
     }
 
+    /// The part of what is on screen that is safe to format, and the part that
+    /// is not.
+    ///
+    /// Markdown of half a document is not markdown of anything: a heading with
+    /// no line after it, a fence with no closing fence. So the answer is cut at
+    /// the last blank line — the end of the last block that is definitely
+    /// finished — and only what precedes it is formatted. The tail is drawn as
+    /// the plain text it still is, and moves to the formatted side as soon as
+    /// the block it belongs to is done.
+    ///
+    /// The cut never lands inside a fenced block, which a blank line does not
+    /// end.
+    pub fn settled(&self) -> (&str, &str) {
+        settled(self.visible())
+    }
+
     /// Shows all of it at once, for when there is no more coming.
     pub fn reveal_everything(&mut self) {
         self.revealed = self.streaming.chars().count();
@@ -220,6 +236,26 @@ impl Conversation {
         self.error = Some(why.into());
         self.sign_in = sign_in;
     }
+}
+
+/// Splits `text` after the last blank line that is not inside a fenced block.
+fn settled(text: &str) -> (&str, &str) {
+    let mut cut = 0;
+    let mut fences = 0;
+    let mut at = 0;
+
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fences += 1;
+        }
+
+        at += line.len();
+        if line.trim().is_empty() && fences % 2 == 0 {
+            cut = at;
+        }
+    }
+
+    text.split_at(cut)
 }
 
 #[cfg(test)]
@@ -331,6 +367,42 @@ mod tests {
 
         assert_eq!(chat.visible().chars().count(), chat.revealed);
         assert!(chat.visible().chars().count() < 5, "it revealed everything");
+    }
+
+    #[test]
+    fn nothing_is_formatted_before_the_first_blank_line() {
+        assert_eq!(
+            settled("# a heading being writ"),
+            ("", "# a heading being writ")
+        );
+    }
+
+    #[test]
+    fn a_finished_paragraph_is_formatted_and_the_rest_is_not() {
+        let (formatted, writing) = settled("# Heading\n\nthe next para");
+
+        assert_eq!(formatted, "# Heading\n\n");
+        assert_eq!(writing, "the next para");
+    }
+
+    /// A blank line does not end a fenced block, and formatting an unclosed
+    /// fence turns the rest of the answer into code.
+    #[test]
+    fn the_cut_never_lands_inside_a_fence() {
+        let answer = "intro\n\n```rust\nlet a = 1;\n\nlet b = 2;\n";
+        let (formatted, writing) = settled(answer);
+
+        assert_eq!(formatted, "intro\n\n");
+        assert!(writing.starts_with("```rust"), "{writing}");
+    }
+
+    #[test]
+    fn a_closed_fence_can_be_formatted() {
+        let answer = "```rust\nlet a = 1;\n```\n\nand then";
+        let (formatted, writing) = settled(answer);
+
+        assert!(formatted.ends_with("```\n\n"), "{formatted}");
+        assert_eq!(writing, "and then");
     }
 
     #[test]

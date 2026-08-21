@@ -13,7 +13,7 @@ use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Styled as _, UniformListScrollHandle, Window, actions, div, px,
+    SharedString, Styled as _, Window, actions, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
@@ -28,6 +28,7 @@ use crate::document::{OpenDocument, Page, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
+use gpui::UniformListScrollHandle;
 use pedro_agent::AgentError;
 
 actions!(
@@ -36,6 +37,8 @@ actions!(
         FocusSearch,
         NextPage,
         PreviousPage,
+        NextTab,
+        PreviousTab,
         ZoomIn,
         ZoomOut,
         ZoomReset
@@ -104,7 +107,6 @@ pub struct Pedro {
     /// A cell rather than plain state: it is written during layout, and asking
     /// the view to change then would ask for another frame, every frame.
     pub(crate) page_bounds: Rc<RefCell<HashMap<u32, Bounds<Pixels>>>>,
-    pub(crate) page_scroll: UniformListScrollHandle,
     /// Whether the pointer is down on the page, dragging out a passage.
     pub(crate) selecting: bool,
     /// The passages the next question is about, in the order they were marked.
@@ -167,7 +169,6 @@ impl Pedro {
             zoom: 1.0,
             confirming_removal: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
-            page_scroll: UniformListScrollHandle::new(),
             selecting: false,
             attached: Vec::new(),
             notice: None,
@@ -531,7 +532,7 @@ impl Pedro {
 
                 // The list holds the position now, so continuing where the
                 // reader left off is a scroll rather than a page number.
-                self.page_scroll
+                tab.scroll
                     .scroll_to_item(page as usize - 1, ScrollStrategy::Top);
             }
             Err(why) => {
@@ -828,8 +829,9 @@ impl Pedro {
 
         if let Some(page) = open.turn(by) {
             // The list is what holds the position, so a page turn is a scroll.
-            self.page_scroll
-                .scroll_to_item(page as usize - 1, ScrollStrategy::Top);
+            if let Some(scroll) = self.page_scroll() {
+                scroll.scroll_to_item(page as usize - 1, ScrollStrategy::Top);
+            }
             cx.notify();
         }
     }
@@ -939,10 +941,32 @@ impl Pedro {
     }
 
     pub(crate) fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.tabs.len() {
-            self.active_tab = Some(index);
-            cx.notify();
+        if index >= self.tabs.len() {
+            return;
         }
+
+        if self.active_tab == Some(index) {
+            return;
+        }
+
+        self.active_tab = Some(index);
+        // Pages of the book being left are drawn in the same coordinates as
+        // pages of the one being opened, and only the latter will repaint.
+        self.page_bounds.borrow_mut().clear();
+
+        // A passage belongs to the book it was marked in, and so does a
+        // conversation: citations in one point at pages of the other. An answer
+        // still being written is left to finish and store itself, and is
+        // reachable afterwards from the mark that started it.
+        self.attached.clear();
+        self.chat = None;
+
+        cx.notify();
+    }
+
+    /// The scroll of the book being read, which each tab keeps for itself.
+    pub(crate) fn page_scroll(&self) -> Option<&UniformListScrollHandle> {
+        self.active_tab().map(|tab| &tab.scroll)
     }
 
     pub(crate) fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1296,6 +1320,27 @@ impl Pedro {
         self.set_zoom(ZOOM_STEPS[next], cx);
     }
 
+    /// Moves to the next book along, wrapping round.
+    fn step_tab(&mut self, by: i32, cx: &mut Context<Self>) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+
+        let count = self.tabs.len() as i32;
+        let here = self.active_tab.unwrap_or(0) as i32;
+        let next = (here + by).rem_euclid(count) as usize;
+
+        self.activate_tab(next, cx);
+    }
+
+    fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(1, cx);
+    }
+
+    fn previous_tab(&mut self, _: &PreviousTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(-1, cx);
+    }
+
     fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
         self.step_zoom(1, cx);
     }
@@ -1502,6 +1547,8 @@ impl Render for Pedro {
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::previous_page))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))

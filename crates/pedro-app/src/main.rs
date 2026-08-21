@@ -17,7 +17,9 @@ use gpui_component::Root;
 use gpui_component::input::{Backspace, Enter};
 use tracing_subscriber::EnvFilter;
 
-use crate::app::{FocusSearch, NextPage, Pedro, PreviousPage, ZoomIn, ZoomOut, ZoomReset};
+use crate::app::{
+    FocusSearch, NextPage, NextTab, Pedro, PreviousPage, PreviousTab, ZoomIn, ZoomOut, ZoomReset,
+};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -42,6 +44,9 @@ fn main() {
                 KeyBinding::new("cmd-+", ZoomIn, None),
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("cmd-0", ZoomReset, None),
+                // The keys every tabbed application uses for this.
+                KeyBinding::new("cmd-shift-]", NextTab, None),
+                KeyBinding::new("cmd-shift-[", PreviousTab, None),
                 // Registered after `gpui_component::init`, so these shadow the
                 // ones it binds for the same keys in the same context.
                 //

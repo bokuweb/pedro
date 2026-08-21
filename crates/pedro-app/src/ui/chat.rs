@@ -10,12 +10,13 @@
 //! they were typed: a question is not a document, and silently reflowing
 //! someone's asterisks is a surprise, not a feature.
 //!
-//! An answer still being written is drawn as plain text, and formatted once it
-//! is finished. The markdown view re-parses on a 200ms debounce that restarts
-//! on every change, so while tokens keep arriving it never re-parses at all and
-//! the answer lands in slabs whenever the stream happens to pause. Plain text
-//! draws exactly what it is given, which is what lets the answer be revealed at
-//! a steady rate.
+//! An answer still being written is formatted as far as it is finished and
+//! drawn plainly after that. The markdown view re-parses on a 200ms debounce
+//! that restarts on every change, so text that changes every frame is never
+//! parsed at all — which is why a streaming answer used to land in slabs
+//! whenever the stream happened to pause. Blocks that are done change rarely
+//! enough to be parsed; the line being written changes constantly and is drawn
+//! as the plain text it still is.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -73,7 +74,7 @@ impl Pedro {
                             render_bubble("pending", Role::User, question, Vec::new(), window, cx)
                         }))
                         .when(chat.is_answering(), |this| {
-                            this.child(render_answer_in_progress(chat.visible(), cx))
+                            this.child(render_answer_in_progress(chat.settled(), window, cx))
                         })
                         .children(
                             chat.error
@@ -298,9 +299,14 @@ fn render_body(
 }
 
 /// The answer as it is being written, with somewhere to stop it.
-fn render_answer_in_progress(streaming: &str, cx: &mut Context<Pedro>) -> impl IntoElement + use<> {
-    let written: SharedString = streaming.to_owned().into();
-    let started = !streaming.is_empty();
+fn render_answer_in_progress(
+    (formatted, writing): (&str, &str),
+    window: &mut Window,
+    cx: &mut Context<Pedro>,
+) -> impl IntoElement + use<> {
+    let formatted: SharedString = formatted.to_owned().into();
+    let writing: SharedString = writing.to_owned().into();
+    let started = !formatted.is_empty() || !writing.is_empty();
 
     v_flex()
         .gap(px(6.))
@@ -317,9 +323,13 @@ fn render_answer_in_progress(streaming: &str, cx: &mut Context<Pedro>) -> impl I
                     palette::text_faint()
                 })
                 .child(if started {
-                    // Plain while it is being written; the stored message that
-                    // replaces this is the formatted one.
-                    render_plain(written)
+                    v_flex()
+                        .children((!formatted.is_empty()).then(|| {
+                            TextView::markdown("turn:writing", formatted, window, cx)
+                                .selectable(true)
+                        }))
+                        .children((!writing.is_empty()).then(|| render_plain(writing)))
+                        .into_any_element()
                 } else {
                     // The first token can take a few seconds. Saying so is more
                     // use than a spinner.

@@ -5,7 +5,7 @@
 //! contents follow the open book and the page it is on, and a cache of that has
 //! to be swept on every event that moves either — which is every event.
 
-use gpui::SharedString;
+use gpui::{SharedString, UniformListScrollHandle};
 use gpui_component::IconName;
 use pedro_agent::{AgentKind, DiscoveredAgent};
 use pedro_core::model::{Book, Highlight};
@@ -483,6 +483,10 @@ impl AgentStatus {
 pub struct OpenTab {
     pub id: SharedString,
     pub label: SharedString,
+    /// Where this book is scrolled to. One per tab: a shared handle would put
+    /// every book at whatever offset the last one was left at, which for books
+    /// of different lengths is not even a page.
+    pub scroll: UniformListScrollHandle,
     /// The book itself, once pdfium has opened it. `None` while it is being
     /// read, and on a tab that is not a book at all.
     pub document: Option<OpenDocument>,
@@ -495,6 +499,7 @@ impl OpenTab {
         Self {
             id: id.into(),
             label: label.into(),
+            scroll: UniformListScrollHandle::new(),
             document: None,
             error: None,
         }

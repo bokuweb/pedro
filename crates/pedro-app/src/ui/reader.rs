@@ -44,9 +44,15 @@ impl Pedro {
         };
 
         let page_count = open.page_count as usize;
+        let Some(scroll) = self.page_scroll().cloned() else {
+            return render_empty_state().into_any_element();
+        };
 
         uniform_list(
-            "pages",
+            // Keyed by the book: gpui keeps an element's state under its id,
+            // and two books sharing one would share a scroll position that
+            // means a different place in each.
+            SharedString::from(format!("pages:{}", tab.id)),
             page_count,
             cx.processor(|this, range: Range<usize>, _window, cx| {
                 // The list asks for exactly the rows it is about to draw, which
@@ -58,7 +64,7 @@ impl Pedro {
                     .collect()
             }),
         )
-        .track_scroll(self.page_scroll.clone())
+        .track_scroll(scroll)
         .size_full()
         .into_any_element()
     }
