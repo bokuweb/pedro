@@ -68,20 +68,18 @@ impl Pedro {
                     .overflow_x_scroll()
                     .children(tabs),
             )
-            .children(self.chat.is_some().then(|| {
-                self.render_panel_toggle(
-                    "toggle-chat",
-                    if self.chat_pane.is_open() {
-                        IconName::PanelRightClose
-                    } else {
-                        IconName::PanelRightOpen
-                    },
-                    "Conversation",
-                    Box::new(cx.listener(|this, _, window, cx| {
-                        this.toggle_chat(&Default::default(), window, cx)
-                    })),
-                )
-            }));
+            .child(self.render_panel_toggle(
+                "toggle-chat",
+                if self.chat_pane.is_open() {
+                    IconName::PanelRightClose
+                } else {
+                    IconName::PanelRightOpen
+                },
+                "Conversation",
+                Box::new(cx.listener(|this, _, window, cx| {
+                    this.toggle_chat(&Default::default(), window, cx)
+                })),
+            ));
 
         // The other row along the top edge, and the one a reader is most likely
         // to reach for when there is no title bar to grab.

@@ -20,7 +20,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::text::TextView;
@@ -31,6 +31,7 @@ use pedro_core::model::{ChatMessage, Role};
 use pedro_core::{Citation, CitationKind, PageLocation, PageMiss};
 
 use crate::app::Pedro;
+use crate::chat::Conversation;
 use crate::palette;
 use crate::ui::icon;
 
@@ -45,13 +46,6 @@ impl Pedro {
         if !self.chat_pane.is_visible() {
             return None;
         }
-        let chat = self.chat.as_ref()?;
-
-        let turns: Vec<_> = chat
-            .messages
-            .iter()
-            .map(|message| render_turn(message, window, cx))
-            .collect();
 
         Some(
             v_flex()
@@ -61,41 +55,63 @@ impl Pedro {
                 .flex_shrink_0()
                 .border_l_1()
                 .border_color(palette::border())
-                .child(self.render_chat_header(chat.passage.clone(), chat.page, cx))
-                .child(
-                    v_flex()
-                        .id("conversation")
-                        .flex_1()
-                        .min_h_0()
-                        .p(px(12.))
-                        .gap(px(12.))
-                        .overflow_y_scroll()
-                        .children(turns)
-                        // The question is shown the moment it is asked, above
-                        // an answer that has not started: a question that
-                        // disappears into a spinner reads as one that was lost.
-                        .children(chat.pending.clone().map(|question| {
-                            render_bubble("pending", Role::User, question, Vec::new(), window, cx)
-                        }))
-                        .when(chat.is_answering(), |this| {
-                            this.child(render_answer_in_progress(chat.settled(), window, cx))
-                        })
-                        .children(
-                            chat.error
-                                .clone()
-                                .map(|why| self.render_failure(why, chat.sign_in, cx)),
-                        )
-                        // A passage that has been marked but not asked about
-                        // yet: the panel is showing what the next question is
-                        // about, and saying so is better than looking empty.
-                        .when(
-                            chat.messages.is_empty()
-                                && !chat.is_answering()
-                                && chat.error.is_none(),
-                            |this| this.child(render_nothing_asked_yet()),
-                        ),
-                ),
+                .child(match self.chat.as_ref() {
+                    Some(chat) => self.render_conversation(chat, window, cx),
+                    // The panel can be opened before there is anything to put
+                    // in it. Saying what would fill it is more use than an
+                    // empty column that looks like a fault.
+                    None => render_no_conversation().into_any_element(),
+                }),
         )
+    }
+
+    fn render_conversation(
+        &self,
+        chat: &Conversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let turns: Vec<_> = chat
+            .messages
+            .iter()
+            .map(|message| render_turn(message, window, cx))
+            .collect();
+
+        v_flex()
+            .size_full()
+            .child(self.render_chat_header(chat.passage.clone(), chat.page, cx))
+            .child(
+                v_flex()
+                    .id("conversation")
+                    .flex_1()
+                    .min_h_0()
+                    .p(px(12.))
+                    .gap(px(12.))
+                    .overflow_y_scroll()
+                    .children(turns)
+                    // The question is shown the moment it is asked, above an
+                    // answer that has not started: a question that disappears
+                    // into a spinner reads as one that was lost.
+                    .children(chat.pending.clone().map(|question| {
+                        render_bubble("pending", Role::User, question, Vec::new(), window, cx)
+                    }))
+                    .when(chat.is_answering(), |this| {
+                        this.child(render_answer_in_progress(chat.settled(), window, cx))
+                    })
+                    .children(
+                        chat.error
+                            .clone()
+                            .map(|why| self.render_failure(why, chat.sign_in, cx)),
+                    )
+                    // A passage that has been marked but not asked about yet:
+                    // the panel is showing what the next question is about, and
+                    // saying so is better than looking empty.
+                    .when(
+                        chat.messages.is_empty() && !chat.is_answering() && chat.error.is_none(),
+                        |this| this.child(render_nothing_asked_yet()),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// What went wrong, and the one thing that fixes it when there is one.
@@ -209,6 +225,31 @@ fn render_plain(text: SharedString) -> gpui::AnyElement {
             false => div().child(line.to_owned()),
         }))
         .into_any_element()
+}
+
+/// The panel opened with no conversation behind it.
+fn render_no_conversation() -> impl IntoElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .p(px(16.))
+        .child(icon(IconName::Star, px(22.), palette::text_faint()))
+        .child(
+            div()
+                .text_center()
+                .text_size(px(12.))
+                .text_color(palette::text_muted())
+                .child("No conversation open."),
+        )
+        .child(
+            div()
+                .text_center()
+                .text_size(px(11.))
+                .text_color(palette::text_faint())
+                .child("Drag across a page to ask about a passage, or press a mark you left."),
+        )
 }
 
 /// The panel with a subject and nothing said about it yet.
