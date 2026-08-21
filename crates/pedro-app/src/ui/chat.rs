@@ -4,12 +4,18 @@
 //! every passage in full, and it is already on screen as the badges under the
 //! answer. A badge that resolved to a page is a button back into the book,
 //! which is the whole point of asking the model to cite at all.
+//!
+//! Answers are markdown, because the prompt asks for headings, lists, tables
+//! and fenced code and the model obliges. The reader's own words are drawn as
+//! they were typed: a question is not a document, and silently reflowing
+//! someone's asterisks is a surprise, not a feature.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{IconName, h_flex, v_flex};
 use pedro_core::citation::strip_sources;
@@ -23,13 +29,17 @@ use crate::ui::icon;
 const WIDTH: f32 = 380.;
 
 impl Pedro {
-    pub(crate) fn render_chat(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    pub(crate) fn render_chat(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         let chat = self.chat.as_ref()?;
 
         let turns: Vec<_> = chat
             .messages
             .iter()
-            .map(|message| render_turn(message, cx))
+            .map(|message| render_turn(message, window, cx))
             .collect();
 
         Some(
@@ -52,13 +62,11 @@ impl Pedro {
                         // The question is shown the moment it is asked, above
                         // an answer that has not started: a question that
                         // disappears into a spinner reads as one that was lost.
-                        .children(
-                            chat.pending.clone().map(|question| {
-                                render_bubble(Role::User, question, Vec::new(), cx)
-                            }),
-                        )
+                        .children(chat.pending.clone().map(|question| {
+                            render_bubble("pending", Role::User, question, Vec::new(), window, cx)
+                        }))
                         .when(chat.is_answering(), |this| {
-                            this.child(render_answer_in_progress(&chat.streaming, cx))
+                            this.child(render_answer_in_progress(&chat.streaming, window, cx))
                         })
                         .children(
                             chat.error
@@ -169,19 +177,32 @@ impl Pedro {
     }
 }
 
-fn render_turn(message: &ChatMessage, cx: &mut Context<Pedro>) -> impl IntoElement + use<> {
+fn render_turn(
+    message: &ChatMessage,
+    window: &mut Window,
+    cx: &mut Context<Pedro>,
+) -> impl IntoElement + use<> {
     let body: SharedString = match message.role {
         Role::Assistant => strip_sources(&message.content).into(),
         Role::User => message.content.clone().into(),
     };
 
-    render_bubble(message.role, body, message.citations.clone(), cx)
+    render_bubble(
+        &message.id,
+        message.role,
+        body,
+        message.citations.clone(),
+        window,
+        cx,
+    )
 }
 
 fn render_bubble(
+    id: &str,
     role: Role,
     body: SharedString,
     citations: Vec<Citation>,
+    window: &mut Window,
     cx: &mut Context<Pedro>,
 ) -> impl IntoElement + use<> {
     let reader = matches!(role, Role::User);
@@ -201,15 +222,40 @@ fn render_bubble(
                 .when(!reader, |this| this.bg(palette::surface()))
                 .text_size(px(13.))
                 .text_color(palette::text())
-                .child(body),
+                .child(render_body(id, reader, body, window, cx)),
         )
         .when(!sources.is_empty(), |this| {
             this.child(h_flex().flex_wrap().gap(px(6.)).children(sources))
         })
 }
 
+/// The words of one turn.
+///
+/// An answer is markdown; a question is what the reader typed. The identifier
+/// has to be stable across frames — the view keeps its parsed document under
+/// it — and unique between turns, or two answers share one document.
+fn render_body(
+    id: &str,
+    reader: bool,
+    body: SharedString,
+    window: &mut Window,
+    cx: &mut Context<Pedro>,
+) -> gpui::AnyElement {
+    if reader {
+        return div().child(body).into_any_element();
+    }
+
+    TextView::markdown(SharedString::from(format!("turn:{id}")), body, window, cx)
+        .selectable(true)
+        .into_any_element()
+}
+
 /// The answer as it is being written, with somewhere to stop it.
-fn render_answer_in_progress(streaming: &str, cx: &mut Context<Pedro>) -> impl IntoElement + use<> {
+fn render_answer_in_progress(
+    streaming: &str,
+    window: &mut Window,
+    cx: &mut Context<Pedro>,
+) -> impl IntoElement + use<> {
     let written: SharedString = streaming.to_owned().into();
     let started = !streaming.is_empty();
 
@@ -228,11 +274,13 @@ fn render_answer_in_progress(streaming: &str, cx: &mut Context<Pedro>) -> impl I
                     palette::text_faint()
                 })
                 .child(if started {
-                    written
+                    // Rendered as it arrives, half-written markdown and all:
+                    // a table that assembles itself is the point of streaming.
+                    render_body("streaming", false, written, window, cx)
                 } else {
-                    // The first token can take a few seconds. Saying which CLI
-                    // is being waited on is more use than a spinner.
-                    "Asking…".into()
+                    // The first token can take a few seconds. Saying so is more
+                    // use than a spinner.
+                    div().child("Asking…").into_any_element()
                 }),
         )
         .child(

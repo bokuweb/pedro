@@ -15,7 +15,7 @@ use gpui::{
     IntoElement, ParentElement as _, PathPromptOptions, Pixels, Point, Render, ScrollStrategy,
     SharedString, Styled as _, UniformListScrollHandle, Window, actions, div, px,
 };
-use gpui_component::input::InputState;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
 use pedro_core::model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};
@@ -127,8 +127,16 @@ impl Pedro {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(1, 6)
-                .placeholder("Ask about this document…")
+                .placeholder("Ask about this document… (⏎ to send, ⇧⏎ for a line)")
         });
+        cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
+            // Enter is bound to the secondary variant in `main`, which is what
+            // tells it apart from the shift-enter that only breaks the line.
+            if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                this.ask(window, cx);
+            }
+        })
+        .detach();
 
         let agent_status = AgentStatus::Detecting;
         let library = Library::Opening;
@@ -1017,6 +1025,11 @@ impl Pedro {
     pub(crate) fn ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let question = self.composer.read(cx).value().trim().to_string();
         if question.is_empty() {
+            // Enter on an empty field still broke a line before it got here,
+            // and a field that fills with blank lines is a field that looks
+            // broken.
+            self.composer
+                .update(cx, |composer, cx| composer.set_value("", window, cx));
             return;
         }
         if self.chat.as_ref().is_some_and(Conversation::is_answering) {
@@ -1377,7 +1390,7 @@ impl Render for Pedro {
                                             .h_full()
                                             .child(self.render_reader(cx)),
                                     )
-                                    .children(self.render_chat(cx)),
+                                    .children(self.render_chat(window, cx)),
                             )
                             .child(self.render_composer(cx)),
                     ),

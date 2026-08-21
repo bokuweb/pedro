@@ -14,6 +14,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
+use gpui_component::input::{Backspace, Enter};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::{FocusSearch, NextPage, Pedro, PreviousPage, ZoomIn, ZoomOut, ZoomReset};
@@ -41,6 +42,21 @@ fn main() {
                 KeyBinding::new("cmd-+", ZoomIn, None),
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("cmd-0", ZoomReset, None),
+                // Registered after `gpui_component::init`, so these shadow the
+                // ones it binds for the same keys in the same context.
+                //
+                // Enter sends the question and shift-enter breaks the line,
+                // the way every chat does it. Both still insert a newline
+                // first — a multi-line field is what they are for — and the
+                // one that sends throws the field away anyway. `secondary` is
+                // how the two are told apart afterwards.
+                KeyBinding::new("enter", Enter { secondary: true }, Some("Input")),
+                KeyBinding::new("shift-enter", Enter { secondary: false }, Some("Input")),
+                // Emacs' backspace. macOS turns ctrl-h into one for native
+                // text views, and a view that draws its own text has to say so
+                // itself.
+                KeyBinding::new("ctrl-h", Backspace, Some("Input")),
+                KeyBinding::new("ctrl-d", gpui_component::input::Delete, Some("Input")),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
