@@ -14,11 +14,13 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, RenderImage, SharedString, Styled as _, canvas, div, img,
-    px, relative, uniform_list,
+    MouseMoveEvent, ParentElement as _, RenderImage, SharedString, StatefulInteractiveElement as _,
+    Styled as _, canvas, div, img, px, relative, uniform_list,
 };
+use gpui_component::input::Input;
 use gpui_component::{IconName, Sizable as _, h_flex, spinner::Spinner, v_flex};
 use pedro_pdf::Rect;
 
@@ -37,6 +39,13 @@ impl Pedro {
 
         if let Some(why) = &tab.error {
             return render_failure(tab.label.clone(), why.clone()).into_any_element();
+        }
+
+        // A shelf has no pages of its own. What it has is the books on it, and
+        // this is where the reader sees which ones a question will be answered
+        // from — the same place a book shows them its pages.
+        if tab.id.starts_with("shelf:") {
+            return self.render_shelf(cx).into_any_element();
         }
 
         let Some(open) = &tab.document else {
@@ -67,6 +76,177 @@ impl Pedro {
         .track_scroll(scroll)
         .size_full()
         .into_any_element()
+    }
+
+    /// A shelf: its name, and the books a question to it is answered from.
+    fn render_shelf(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let Some(shelf) = self.active_shelf().cloned() else {
+            return render_empty_state().into_any_element();
+        };
+
+        let books: Vec<_> = self
+            .library
+            .books()
+            .iter()
+            .filter(|book| book.folder_id.as_deref() == Some(shelf.id.as_str()))
+            .map(|book| self.render_shelf_book(book, &shelf.id, cx))
+            .collect();
+
+        let empty = books.is_empty();
+        let id = shelf.id.clone();
+
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .px(px(28.))
+                    .pt(px(24.))
+                    .pb(px(12.))
+                    .gap(px(10.))
+                    .items_center()
+                    .child(icon(IconName::Folder, px(18.), palette::text_muted()))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.shelf_name)))
+                    .child(self.render_shelf_delete(&id, cx)),
+            )
+            .child(
+                div()
+                    .px(px(28.))
+                    .pb(px(14.))
+                    .text_size(px(12.))
+                    .text_color(palette::text_faint())
+                    .child(match empty {
+                        true => SharedString::from(
+                            "Drag books here from the sidebar, or right-click one to put it on                              this shelf.",
+                        ),
+                        false => SharedString::from(format!(
+                            "{} book{} — a question in the panel is answered from all of them.",
+                            books.len(),
+                            if books.len() == 1 { "" } else { "s" }
+                        )),
+                    }),
+            )
+            .child(
+                v_flex()
+                    .id("shelf-books")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.))
+                    .pb(px(20.))
+                    .gap(px(6.))
+                    .children(books),
+            )
+            .into_any_element()
+    }
+
+    /// One book on a shelf, with the way to take it off again.
+    fn render_shelf_book(
+        &self,
+        book: &pedro_core::model::Book,
+        shelf_id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let book_id = book.id.clone();
+        let open_id = book.id.clone();
+        let label = SharedString::from(book.file_name.clone());
+        let pages = SharedString::from(format!("{} pages", book.page_count));
+        let _ = shelf_id;
+
+        h_flex()
+            .id(SharedString::from(format!("shelf-book:{}", book.id)))
+            .group("shelf-book")
+            .h(px(52.))
+            .px(px(14.))
+            .gap(px(12.))
+            .items_center()
+            .rounded(px(10.))
+            .bg(palette::row())
+            .cursor_pointer()
+            .hover(|this| this.bg(palette::row_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_book_tab(&open_id, cx);
+            }))
+            .child(icon(IconName::BookOpen, px(15.), palette::text_faint()))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(palette::text())
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::text_faint())
+                            .child(pages),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("unshelve:{}", book.id)))
+                    .px(px(8.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .invisible()
+                    .group_hover("shelf-book", |this| this.visible())
+                    .bg(palette::surface())
+                    .hover(|this| this.bg(palette::danger().opacity(0.3)))
+                    .text_size(px(10.))
+                    .text_color(palette::text_muted())
+                    .child("Take off")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.shelve_book(&book_id, None, cx);
+                    })),
+            )
+    }
+
+    /// Throws the shelf away, asking first. The books stay.
+    fn render_shelf_delete(
+        &self,
+        shelf_id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let id = SharedString::from(format!("shelf:{shelf_id}"));
+        let confirming = self.is_confirming(&id);
+        let shelf_id = shelf_id.to_owned();
+        let asked = id.clone();
+
+        div()
+            .id("delete-shelf")
+            .px(px(10.))
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(confirming, |this| this.bg(palette::danger().opacity(0.24)))
+            .hover(|this| this.bg(palette::danger().opacity(0.36)))
+            .text_size(px(11.))
+            .text_color(if confirming {
+                palette::danger()
+            } else {
+                palette::text_muted()
+            })
+            .child(if confirming {
+                "Delete the shelf? The books stay."
+            } else {
+                "Delete shelf"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                match this.is_confirming(&asked) {
+                    true => this.delete_shelf(&shelf_id, cx),
+                    false => this.confirm(asked.clone(), cx),
+                }
+            }))
     }
 
     /// One page, centred in a row of its own.

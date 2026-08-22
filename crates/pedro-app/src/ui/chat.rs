@@ -79,7 +79,7 @@ impl Pedro {
 
         v_flex()
             .size_full()
-            .child(self.render_chat_header(chat.passage.clone(), chat.page, cx))
+            .child(self.render_chat_header(chat, cx))
             .child(
                 v_flex()
                     .id("conversation")
@@ -165,10 +165,25 @@ impl Pedro {
 
     fn render_chat_header(
         &self,
-        passage: SharedString,
-        page: u32,
+        chat: &Conversation,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // A shelf has no page to point at, so the line that would say which
+        // page says how many books instead. Same header, different fact.
+        let shelf = matches!(chat.about, Some(pedro_core::Conversation::Folder(_)));
+        let above: SharedString = match shelf {
+            true => {
+                let count = self
+                    .active_shelf()
+                    .map(|shelf| shelf.book_count)
+                    .unwrap_or_default();
+
+                format!("{count} book{}", if count == 1 { "" } else { "s" }).into()
+            }
+            false => format!("p. {}", chat.page).into(),
+        };
+        let passage = chat.passage.clone();
+
         h_flex()
             .flex_shrink_0()
             .px(px(12.))
@@ -177,7 +192,15 @@ impl Pedro {
             .items_start()
             .border_b_1()
             .border_color(palette::separator())
-            .child(icon(IconName::Star, px(13.), palette::code()))
+            .child(icon(
+                if shelf {
+                    IconName::Folder
+                } else {
+                    IconName::Star
+                },
+                px(13.),
+                palette::code(),
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -187,7 +210,7 @@ impl Pedro {
                         div()
                             .text_size(px(11.))
                             .text_color(palette::text_faint())
-                            .child(format!("p. {page}")),
+                            .child(above),
                     )
                     .child(
                         div()
@@ -404,6 +427,11 @@ fn render_answer_in_progress(
 /// with the reason, because that is the reader's only sign that the model
 /// reworded the passage rather than quoting it.
 fn render_citation(citation: Citation, cx: &mut Context<Pedro>) -> impl IntoElement + use<> {
+    // A conversation with a shelf is answered from several books, so a page
+    // number alone does not say where to look. The badge stays short — a title
+    // in it would push the others off the row — and the book's name goes in the
+    // tooltip, above the passage it is a page of.
+    let from = citation.book.clone();
     let label: SharedString = match (citation.kind, citation.page) {
         (CitationKind::Web, _) => format!("[{}] web", citation.id).into(),
         (_, Some(PageLocation::Found(page))) => format!("[{}] p. {page}", citation.id).into(),
@@ -415,11 +443,11 @@ fn render_citation(citation: Citation, cx: &mut Context<Pedro>) -> impl IntoElem
         Some(PageLocation::Found(page)) => Some(page),
         _ => None,
     };
-    let hint: SharedString = citation
-        .url
-        .clone()
-        .unwrap_or_else(|| citation.text.clone())
-        .into();
+    let hint: SharedString = match (&citation.url, &from) {
+        (Some(url), _) => url.clone().into(),
+        (None, Some(book)) => format!("{}\n{}", book.title, citation.text).into(),
+        (None, None) => citation.text.clone().into(),
+    };
 
     div()
         .id((
@@ -443,7 +471,12 @@ fn render_citation(citation: Citation, cx: &mut Context<Pedro>) -> impl IntoElem
         .child(label)
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
         .when_some(jump, |this, page| {
-            this.on_click(cx.listener(move |this, _, _, cx| this.show_page(page, cx)))
+            this.on_click(cx.listener(move |this, _, _, cx| match &from {
+                // The book is named when the answer came from a shelf, and the
+                // page is a page of that book rather than of whatever is open.
+                Some(book) => this.open_found(&book.id, page, cx),
+                None => this.show_page(page, cx),
+            }))
         })
 }
 

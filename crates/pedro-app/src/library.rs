@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui::SharedString;
-use pedro_core::model::Book;
+use pedro_core::model::{Book, Folder};
 use pedro_core::store::Store;
 use time::OffsetDateTime;
 
@@ -45,6 +45,10 @@ pub enum Library {
         /// takes to write it.
         root: std::path::PathBuf,
         books: Vec<Book>,
+        /// The shelves the books are arranged on. Held beside them because the
+        /// sidebar draws both in one pass and a lock taken mid-frame is a lock
+        /// taken behind an agent that is holding it to write an answer.
+        shelves: Vec<Folder>,
     },
     /// The library could not be opened at all — a read-only home directory, a
     /// corrupt database. Carries what to tell the reader.
@@ -55,6 +59,13 @@ impl Library {
     pub fn books(&self) -> &[Book] {
         match self {
             Library::Ready { books, .. } => books,
+            _ => &[],
+        }
+    }
+
+    pub fn shelves(&self) -> &[Folder] {
+        match self {
+            Library::Ready { shelves, .. } => shelves,
             _ => &[],
         }
     }
@@ -118,6 +129,7 @@ mod tests {
 
     fn book(file_name: &str) -> Book {
         Book {
+            folder_id: None,
             id: "id".to_owned(),
             file_name: file_name.to_owned(),
             file_hash: "hash".to_owned(),

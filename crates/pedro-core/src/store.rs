@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use pedro_pdf::{Document, OutlineItem, PdfError};
-use pedro_search::{index, tokenize};
+use pedro_search::index;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
@@ -82,10 +82,6 @@ const SEARCH_LIMIT: usize = 40;
 /// gap, far enough from both ends that a near miss on either side of it is
 /// still the right call.
 const RELATED: f32 = 0.25;
-
-/// How much of a question a passage has to contain before its words alone are
-/// reason enough to attach it. See [`Store::passages_for`].
-const COVERED: f32 = 0.5;
 
 impl Store {
     /// Opens the library under `root`, creating it if it is not there yet.
@@ -291,8 +287,8 @@ impl Store {
     /// prompt is indistinguishable, to whatever is reading it, from a passage
     /// that answers the question. So a passage joins the context only if it
     /// means something like the question — the vector floor — or actually
-    /// contains a fair part of it. Turning up nothing is a fine answer here,
-    /// and the marked pages are still sent.
+    /// holds the words in it that were worth typing. Turning up nothing is a
+    /// fine answer here, and the marked pages are still sent.
     pub fn passages_for(
         &self,
         books: &[String],
@@ -306,7 +302,6 @@ impl Store {
         let words = index::search(&self.connection, question, SEARCH_LIMIT)?
             .into_iter()
             .filter(|hit| !known.contains(hit.text.as_str()))
-            .filter(|hit| tokenize::coverage(question, &hit.text) >= COVERED)
             .collect();
 
         Ok(

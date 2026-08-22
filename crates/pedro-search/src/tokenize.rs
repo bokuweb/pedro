@@ -67,17 +67,25 @@ pub fn for_index(text: &str) -> String {
     tokenize(text).join(" ")
 }
 
-/// The tokens as an FTS5 query: every token quoted, any of them may match.
+/// Tokens as an FTS5 query: every one quoted, any of them may match.
 ///
 /// Quoted because a token can contain characters FTS5 reads as syntax, and
 /// joined with OR because a bigram-segmented phrase rarely matches in full —
 /// ranking is what decides which hits are good, not the query.
-pub fn for_query(text: &str) -> String {
-    tokenize(text)
+pub fn as_query(tokens: &[&str]) -> String {
+    tokens
         .iter()
-        .map(|token| format!("\"{}\"", token.replace('"', "")))
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+/// The tokens of `text` as an FTS5 query.
+pub fn for_query(text: &str) -> String {
+    let tokens = tokenize(text);
+    let borrowed: Vec<&str> = tokens.iter().map(String::as_str).collect();
+
+    as_query(&borrowed)
 }
 
 fn flush(run: &mut String, is_cjk: bool, tokens: &mut Vec<String>) {
@@ -159,59 +167,5 @@ mod tests {
     fn an_empty_query_is_empty() {
         assert_eq!(for_query("  "), "");
         assert_eq!(for_index(""), "");
-    }
-}
-
-/// What fraction of `query`'s tokens appear in `text`, from 0 to 1.
-///
-/// The query the index is searched with joins its tokens with OR, so one
-/// incidental token is enough to return a passage — which is what ranking is
-/// for in a search box, and not enough where a passage has to be about the
-/// question rather than merely adjacent to it. This is the measure that tells
-/// those two apart, and it is deliberately the crude one: how much of what was
-/// asked is actually there.
-pub fn coverage(query: &str, text: &str) -> f32 {
-    let wanted = tokenize(query);
-    if wanted.is_empty() {
-        return 0.;
-    }
-
-    let present: std::collections::HashSet<String> = tokenize(text).into_iter().collect();
-    let found = wanted
-        .iter()
-        .filter(|token| present.contains(*token))
-        .count();
-
-    found as f32 / wanted.len() as f32
-}
-
-#[cfg(test)]
-mod coverage_tests {
-    use super::coverage;
-
-    #[test]
-    fn a_passage_holding_the_whole_query_covers_it() {
-        assert_eq!(
-            coverage("素数を生成", "エラトステネスのふるいで素数を生成する"),
-            1.0
-        );
-    }
-
-    #[test]
-    fn a_passage_sharing_one_token_barely_covers_it() {
-        // "リア" alone, out of eight bigrams: the shape of the false match a
-        // bigram OR query makes.
-        let share = coverage("イタリア料理のレシピ", "シリアルポートを開く");
-        assert!(share < 0.3, "{share}");
-    }
-
-    #[test]
-    fn a_passage_about_something_else_covers_nothing() {
-        assert_eq!(coverage("犬の散歩", "public key cryptography"), 0.0);
-    }
-
-    #[test]
-    fn an_empty_query_covers_nothing() {
-        assert_eq!(coverage("", "anything at all"), 0.0);
     }
 }

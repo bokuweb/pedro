@@ -247,8 +247,7 @@ impl OpenDocument {
     /// sentence twice means the question they asked about it last.
     pub fn highlight_at(&self, page: u32, x: f32, y: f32) -> Option<&Highlight> {
         self.highlights_on(page)
-            .filter(|highlight| highlight.rects.iter().any(|rect| rect.contains(x, y)))
-            .next_back()
+            .rfind(|highlight| highlight.rects.iter().any(|rect| rect.contains(x, y)))
     }
 }
 

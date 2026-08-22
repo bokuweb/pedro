@@ -157,7 +157,14 @@ pub fn forget_for_test(connection: &Connection, book_id: &str) -> Result<(), Ind
 /// The query is segmented the same way the text was, because a search for
 /// 京駅 only finds 東京駅 if both were cut into the same pairs.
 pub fn search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>, IndexError> {
-    let terms = tokenize::for_query(query);
+    search_terms(connection, &tokenize::for_query(query), limit)
+}
+
+fn search_terms(
+    connection: &Connection,
+    terms: &str,
+    limit: usize,
+) -> Result<Vec<Hit>, IndexError> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
