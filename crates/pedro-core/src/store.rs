@@ -93,7 +93,7 @@ impl Store {
         // and a connection only has it if it was registered first.
         index::prepare();
 
-        let connection = Connection::open(root.join(DATABASE))?;
+        let mut connection = Connection::open(root.join(DATABASE))?;
         // Deleting a book has to take its highlights and their conversations
         // with it, and SQLite only honours that when foreign keys are on — the
         // default is off, per connection.
@@ -101,7 +101,7 @@ impl Store {
         // A write must not stop the reader turning pages.
         let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
 
-        migrate(&connection)?;
+        migrate(&mut connection)?;
 
         let embedder = pedro_search::Embedder::find();
         if let Some(embedder) = &embedder {
@@ -287,8 +287,8 @@ impl Store {
     /// prompt is indistinguishable, to whatever is reading it, from a passage
     /// that answers the question. So a passage joins the context only if it
     /// means something like the question — the vector floor — or actually
-    /// holds the words in it that were worth typing. Turning up nothing is a
-    /// fine answer here, and the marked pages are still sent.
+    /// is about the same subject. Turning up nothing is a fine answer here, and
+    /// the marked pages are still sent.
     pub fn passages_for(
         &self,
         books: &[String],
@@ -296,14 +296,23 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<pedro_search::Hit>, StoreError> {
         let meaning = self.by_meaning(question)?;
-        let known: std::collections::HashSet<&str> =
-            meaning.iter().map(|hit| hit.text.as_str()).collect();
+        // Matched on what the question is about rather than on every pair of
+        // characters in it, so that its grammar does not decide its answer.
+        //
+        // The fallback is for a question that has no content words at all — one
+        // written entirely in hiragana — and not for one that has them and
+        // matched nothing. Those two look alike and mean opposite things: the
+        // first is a question this index cannot read, and the second is a
+        // question it read and answered.
+        let mut words = index::search_about(&self.connection, question, SEARCH_LIMIT)?;
+        if words.is_empty() && !index::asks_about_anything(question) {
+            words = index::search(&self.connection, question, SEARCH_LIMIT)?;
+        }
 
-        let words = index::search(&self.connection, question, SEARCH_LIMIT)?
-            .into_iter()
-            .filter(|hit| !known.contains(hit.text.as_str()))
-            .collect();
-
+        // Both lists go in whole. What the two ways of looking agree on is the
+        // best evidence there is that a passage belongs, and dropping the
+        // overlap from one side to avoid repeating it throws exactly that away:
+        // the passage both ranked first ends up scored as though only one had.
         Ok(
             pedro_search::fuse::reciprocal_rank(&[words, meaning], limit)
                 .into_iter()
@@ -962,7 +971,7 @@ COMMIT;
 ///
 /// `user_version` rather than a migrations table: there is one writer, one
 /// file, and the version is a number SQLite already carries.
-fn migrate(connection: &Connection) -> Result<(), StoreError> {
+fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
     if version < 1 {
@@ -985,6 +994,18 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
         rebuilt?;
 
         connection.pragma_update(None, "user_version", 3)?;
+    }
+
+    if version < 4 {
+        // The text index grew a second cut of the same passages — content words
+        // beside character pairs — so it is built again from the passages,
+        // which stay where they are and keep their vectors.
+        if index::text_columns(connection).is_some_and(|sql| !sql.contains("words")) {
+            let rebuilt = index::rebuild_text(connection)?;
+            tracing::info!(passages = rebuilt, "rebuilt the text index");
+        }
+
+        connection.pragma_update(None, "user_version", 4)?;
     }
 
     Ok(())

@@ -17,3 +17,5 @@ memmap2 = "0.9"
 safetensors = "0.4"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]

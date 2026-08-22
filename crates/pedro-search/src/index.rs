@@ -62,6 +62,12 @@ pub struct Hit {
 ///
 /// `chunks_fts` holds the tokens rather than the text: FTS5 is given words it
 /// can see, and the text it came from stays in `chunks` where it is read from.
+///
+/// It holds them cut two ways, because two questions are asked of it. `tokens`
+/// is every character pair, which is how a search for a string finds it inside
+/// a longer word. `words` is the content words alone, which is how a question
+/// finds what it is about — see [`tokenize::content`] for why the pairs cannot
+/// do that job.
 pub fn create(connection: &Connection) -> Result<(), IndexError> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS chunks (
@@ -77,11 +83,61 @@ pub fn create(connection: &Connection) -> Result<(), IndexError> {
 
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             tokens,
+            words,
             tokenize='unicode61 remove_diacritics 2'
         );",
     )?;
 
     Ok(())
+}
+
+/// Rebuilds the text index from the passages already stored.
+///
+/// The passages themselves are not touched, and neither are their vectors:
+/// those are keyed by a chunk's id, and re-cutting the text would mint new ids
+/// and cost the reader forty seconds of re-embedding for a change that is only
+/// about words. So the FTS table is dropped, made again with whatever columns
+/// this version has, and refilled from `chunks.text`.
+pub fn rebuild_text(connection: &mut Connection) -> Result<usize, IndexError> {
+    let passages: Vec<(String, String)> = connection
+        .prepare("SELECT id, text FROM chunks")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "DROP TABLE IF EXISTS chunks_fts;
+         CREATE VIRTUAL TABLE chunks_fts USING fts5(
+             tokens,
+             words,
+             tokenize='unicode61 remove_diacritics 2'
+         );",
+    )?;
+
+    for (id, text) in &passages {
+        transaction.execute(
+            "INSERT INTO chunks_fts (tokens, words) VALUES (?1, ?2)",
+            params![tokenize::for_index(text), tokenize::content_for_index(text)],
+        )?;
+        transaction.execute(
+            "UPDATE chunks SET fts_rowid = ?2 WHERE id = ?1",
+            params![id, transaction.last_insert_rowid()],
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(passages.len())
+}
+
+/// Which columns the text index was built with, or `None` when there is none.
+pub fn text_columns(connection: &Connection) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
 }
 
 /// Whether a book has been indexed.
@@ -115,8 +171,11 @@ pub fn index_book(
         // The tokens are what FTS5 indexes; the row it lands on is what the
         // chunk is found by afterwards.
         transaction.execute(
-            "INSERT INTO chunks_fts (tokens) VALUES (?1)",
-            [tokenize::for_index(&chunk.text)],
+            "INSERT INTO chunks_fts (tokens, words) VALUES (?1, ?2)",
+            params![
+                tokenize::for_index(&chunk.text),
+                tokenize::content_for_index(&chunk.text),
+            ],
         )?;
         let fts_rowid = transaction.last_insert_rowid();
 
@@ -157,20 +216,86 @@ pub fn forget_for_test(connection: &Connection, book_id: &str) -> Result<(), Ind
 /// The query is segmented the same way the text was, because a search for
 /// 京駅 only finds 東京駅 if both were cut into the same pairs.
 pub fn search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>, IndexError> {
-    search_terms(connection, &tokenize::for_query(query), limit)
+    search_terms(
+        connection,
+        &tokenize::for_query(query),
+        Column::Tokens,
+        limit,
+    )
+}
+
+/// The passages about `question`, best first.
+///
+/// Matched on content words rather than on character pairs, which is what keeps
+/// a question's grammar from deciding its answer. Returns nothing when the
+/// question has no content words to go on — a question written entirely in
+/// hiragana — and the caller falls back to [`search`] for those.
+pub fn search_about(
+    connection: &Connection,
+    question: &str,
+    limit: usize,
+) -> Result<Vec<Hit>, IndexError> {
+    search_terms(
+        connection,
+        &tokenize::content_query(question),
+        Column::Words,
+        limit,
+    )
+}
+
+/// Whether `question` has any content words for [`search_about`] to match on.
+///
+/// False for a question written entirely in hiragana, which is the one case
+/// where finding nothing means the index could not read the question rather
+/// than that it had no answer.
+pub fn asks_about_anything(question: &str) -> bool {
+    !tokenize::content_query(question).is_empty()
+}
+
+/// Which cut of the passages a search reads.
+#[derive(Clone, Copy)]
+enum Column {
+    /// Every pair of characters: finds a string inside a longer word.
+    Tokens,
+    /// The content words alone: finds what a question is about.
+    Words,
+}
+
+impl Column {
+    fn name(self) -> &'static str {
+        match self {
+            Column::Tokens => "tokens",
+            Column::Words => "words",
+        }
+    }
+
+    /// What bm25 scores each column by. Zero is how FTS5 is told to ignore a
+    /// column it still has to carry.
+    fn weights(self) -> (f64, f64) {
+        match self {
+            Column::Tokens => (1., 0.),
+            Column::Words => (0., 1.),
+        }
+    }
 }
 
 fn search_terms(
     connection: &Connection,
     terms: &str,
+    column: Column,
     limit: usize,
 ) -> Result<Vec<Hit>, IndexError> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
 
+    // Restricted to one column, so that a term present in the other cut of the
+    // same text cannot answer for it.
+    let terms = format!("{{{}}} : ({terms})", column.name());
+    let weights = column.weights();
+
     let mut statement = connection.prepare(
-        "SELECT c.book_id, c.page_number, c.text, bm25(chunks_fts) AS rank
+        "SELECT c.book_id, c.page_number, c.text, bm25(chunks_fts, ?3, ?4) AS rank
          FROM chunks_fts
          JOIN chunks c ON c.fts_rowid = chunks_fts.rowid
          WHERE chunks_fts MATCH ?1
@@ -179,7 +304,7 @@ fn search_terms(
     )?;
 
     let hits = statement
-        .query_map(params![terms, limit as i64], |row| {
+        .query_map(params![terms, limit as i64, weights.0, weights.1], |row| {
             Ok(Hit {
                 book_id: row.get(0)?,
                 page_number: row.get(1)?,
