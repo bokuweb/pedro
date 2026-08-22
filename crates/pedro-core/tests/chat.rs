@@ -12,6 +12,7 @@ use pedro_core::chat::{ChatError, Question, ask};
 use pedro_core::model::{Highlight, NewHighlight, Role};
 use pedro_core::store::Store;
 use pedro_core::{Citation, CitationKind, PageLocation, PageMiss};
+use pedro_core::{CitedBook, Conversation, Subject};
 use pedro_pdf::{Rect, fixtures::pdf_with_pages};
 
 /// A library holding one book, with one passage of it marked.
@@ -100,7 +101,7 @@ fn written(cli: &Path, name: &str) -> String {
 
 fn question(highlight: &Highlight, text: &str) -> Question {
     Question {
-        highlight_ids: vec![highlight.id.clone()],
+        about: Subject::Passages(vec![highlight.id.clone()]),
         text: text.to_owned(),
         web_search: false,
     }
@@ -142,7 +143,9 @@ fn an_answer_is_streamed_and_stored_with_its_sources() {
     assert!(!streamed.is_empty(), "nothing was streamed");
     assert_eq!(streamed.concat().trim(), answer);
 
-    let messages = store.messages(&highlight.id).expect("a query");
+    let messages = store
+        .messages(&Conversation::Highlight(highlight.id.clone()))
+        .expect("a query");
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, Role::User);
     assert_eq!(messages[0].content, "これは?");
@@ -156,6 +159,12 @@ fn an_answer_is_streamed_and_stored_with_its_sources() {
             kind: CitationKind::Pdf,
             text: "the runtime runs at the edge".to_owned(),
             page: Some(PageLocation::Found(2)),
+            // The passage was found, so the citation says which book it is in
+            // — which matters once a shelf answers from several.
+            book: Some(CitedBook {
+                id: highlight.book_id.clone(),
+                title: "book.pdf".to_owned(),
+            }),
             url: None,
         }]
     );
@@ -175,7 +184,10 @@ fn a_quote_the_book_does_not_hold_is_stored_as_a_miss() {
         "これは?",
     );
 
-    let citations = &store.messages(&highlight.id).expect("a query")[1].citations;
+    let citations = &store
+        .messages(&Conversation::Highlight(highlight.id.clone()))
+        .expect("a query")[1]
+        .citations;
     assert_eq!(
         citations[0].page,
         Some(PageLocation::Missed(PageMiss::NotInBook))
@@ -273,7 +285,9 @@ exit 1
         "{error}"
     );
 
-    let messages = store.messages(&highlight.id).expect("a query");
+    let messages = store
+        .messages(&Conversation::Highlight(highlight.id.clone()))
+        .expect("a query");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, Role::User);
 }
@@ -286,7 +300,7 @@ fn a_question_about_a_highlight_that_is_not_there_says_so() {
         &store,
         &agent(PathBuf::from("/nonexistent/pedro/claude")),
         &Question {
-            highlight_ids: vec!["nope".to_owned()],
+            about: Subject::Passages(vec!["nope".to_owned()]),
             text: "これは?".to_owned(),
             web_search: false,
         },
@@ -331,7 +345,7 @@ fn a_question_can_be_about_two_passages_at_once() {
         &store,
         &agent(recorder.clone()),
         &Question {
-            highlight_ids: vec![first.id.clone(), second.id.clone()],
+            about: Subject::Passages(vec![first.id.clone(), second.id.clone()]),
             text: "どう違う?".to_owned(),
             web_search: false,
         },
@@ -353,6 +367,182 @@ fn a_question_can_be_about_two_passages_at_once() {
 
     // The conversation hangs off the first, which is where the reader will
     // look for it.
-    assert_eq!(store.messages(&first.id).expect("a query").len(), 2);
-    assert!(store.messages(&second.id).expect("a query").is_empty());
+    assert_eq!(
+        store
+            .messages(&Conversation::Highlight(first.id.clone()))
+            .expect("a query")
+            .len(),
+        2
+    );
+    assert!(
+        store
+            .messages(&Conversation::Highlight(second.id.clone()))
+            .expect("a query")
+            .is_empty()
+    );
+}
+
+/// A shelf of two books, each with a distinctive passage in it.
+fn shelf(name: &str) -> (Store, String) {
+    let root = std::env::temp_dir().join(format!("pedro-shelf-{name}"));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut store = Store::open(&root).expect("a writable library");
+    let shelf = store.create_folder("暗号").expect("a shelf");
+
+    // Latin text: the fixture writes a PDF whose text extraction mangles
+    // anything else, so a Japanese passage would come back out as mojibake and
+    // this would be a test of the fixture rather than of the shelf.
+    for (file, pages) in [
+        (
+            "primes.pdf",
+            [
+                "preface",
+                "a prime is divisible only by one and itself",
+                "afterword",
+            ],
+        ),
+        (
+            "keys.pdf",
+            [
+                "introduction",
+                "the key length is chosen from the work factor",
+                "index",
+            ],
+        ),
+    ] {
+        let source = root.join(file);
+        std::fs::write(&source, pdf_with_pages(&pages)).expect("a writable file");
+        let book = store.add_document(&source).expect("a readable pdf");
+        store
+            .move_book(&book.id, Some(&shelf.id))
+            .expect("a shelved book");
+    }
+
+    (store, shelf.id)
+}
+
+fn about_shelf(id: &str, text: &str) -> Question {
+    Question {
+        about: Subject::Shelf(id.to_owned()),
+        text: text.to_owned(),
+        web_search: false,
+    }
+}
+
+/// A question put to a shelf is answered from every book on it, and the
+/// passages it is given say which book each one came from.
+#[test]
+fn a_question_to_a_shelf_gathers_from_all_of_its_books() {
+    let (store, shelf_id) = shelf("gathers");
+    let recorder = recording("chat-shelf");
+
+    ask(
+        &store,
+        &agent(recorder.clone()),
+        &about_shelf(&shelf_id, "prime"),
+        &Cancellation::new(),
+        &mut |_| {},
+    )
+    .expect("an answering agent");
+
+    let sent = written(&recorder, "command.txt");
+
+    assert!(
+        sent.contains("shelf of PDF documents called \"暗号\""),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("primes.pdf"),
+        "the book was not named: {sent}"
+    );
+    assert!(
+        sent.contains("a prime is divisible only by one and itself"),
+        "the passage was not sent: {sent}"
+    );
+}
+
+/// A source is looked up by its quotation, so the answer says which book it is
+/// in without the model having to name it — and the page is the page of that
+/// book, not of whichever book happened to be first.
+#[test]
+fn a_shelf_citation_resolves_to_the_book_it_is_in() {
+    let (store, shelf_id) = shelf("citation");
+
+    let answer = "The key length follows the work factor[1].\n\n## Sources\n[1] \"the key length is chosen from the work factor\"";
+    ask(
+        &store,
+        &agent(answering("chat-shelf-citation", answer)),
+        &about_shelf(&shelf_id, "key length"),
+        &Cancellation::new(),
+        &mut |_| {},
+    )
+    .expect("an answering agent");
+
+    let messages = store
+        .messages(&Conversation::Folder(shelf_id))
+        .expect("a query");
+    assert_eq!(messages.len(), 2);
+
+    let citation = &messages[1].citations[0];
+    assert_eq!(citation.page, Some(PageLocation::Found(2)));
+    assert_eq!(
+        citation.book.as_ref().map(|book| book.title.as_str()),
+        Some("keys.pdf"),
+        "{citation:?}"
+    );
+}
+
+/// A shelf with nothing on it has nothing to answer from, and says so rather
+/// than asking an agent a question with an empty context.
+#[test]
+fn a_question_to_an_empty_shelf_says_so() {
+    let root = std::env::temp_dir().join("pedro-shelf-empty");
+    let _ = std::fs::remove_dir_all(&root);
+    let store = Store::open(&root).expect("a writable library");
+    let shelf = store.create_folder("空").expect("a shelf");
+
+    let error = ask(
+        &store,
+        &agent(PathBuf::from("/nonexistent/pedro/claude")),
+        &about_shelf(&shelf.id, "これは?"),
+        &Cancellation::new(),
+        &mut |_| {},
+    )
+    .expect_err("an empty shelf");
+
+    assert!(matches!(error, ChatError::EmptyShelf), "{error:?}");
+}
+
+/// The conversation is the shelf's, and a second question carries the first.
+#[test]
+fn a_shelf_conversation_carries_its_turns() {
+    let (store, shelf_id) = shelf("turns");
+    let recorder = recording("chat-shelf-turns");
+
+    for text in ["the first question", "the second question"] {
+        ask(
+            &store,
+            &agent(recorder.clone()),
+            &about_shelf(&shelf_id, text),
+            &Cancellation::new(),
+            &mut |_| {},
+        )
+        .expect("an answering agent");
+    }
+
+    let sent = written(&recorder, "conversation.txt");
+    assert!(
+        sent.contains("the first question"),
+        "the first turn was dropped: {sent}"
+    );
+    assert!(sent.contains("the second question"), "{sent}");
+
+    assert_eq!(
+        store
+            .messages(&Conversation::Folder(shelf_id))
+            .expect("a query")
+            .len(),
+        4
+    );
 }

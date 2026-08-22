@@ -14,6 +14,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use pedro_agent::Cancellation;
+use pedro_core::Subject;
 use pedro_core::chat::{Question, ask};
 use pedro_core::model::NewHighlight;
 use pedro_core::store::Store;
@@ -80,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &store,
         agent,
         &Question {
-            highlight_ids: vec![highlight.id.clone()],
+            about: Subject::Passages(vec![highlight.id.clone()]),
             text: question,
             web_search: false,
         },

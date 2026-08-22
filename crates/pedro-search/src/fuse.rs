@@ -44,7 +44,9 @@ pub fn reciprocal_rank(rankings: &[Vec<Hit>], limit: usize) -> Vec<Hit> {
 /// By where it is rather than by an identifier: the two searches read the same
 /// rows, and a page of a book is what the reader is being sent to either way.
 fn same_passage(left: &Hit, right: &Hit) -> bool {
-    left.book_id == right.book_id && left.page_number == right.page_number && left.text == right.text
+    left.book_id == right.book_id
+        && left.page_number == right.page_number
+        && left.text == right.text
 }
 
 #[cfg(test)]

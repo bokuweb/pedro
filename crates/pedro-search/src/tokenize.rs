@@ -177,7 +177,10 @@ pub fn coverage(query: &str, text: &str) -> f32 {
     }
 
     let present: std::collections::HashSet<String> = tokenize(text).into_iter().collect();
-    let found = wanted.iter().filter(|token| present.contains(*token)).count();
+    let found = wanted
+        .iter()
+        .filter(|token| present.contains(*token))
+        .count();
 
     found as f32 / wanted.len() as f32
 }
@@ -188,7 +191,10 @@ mod coverage_tests {
 
     #[test]
     fn a_passage_holding_the_whole_query_covers_it() {
-        assert_eq!(coverage("素数を生成", "エラトステネスのふるいで素数を生成する"), 1.0);
+        assert_eq!(
+            coverage("素数を生成", "エラトステネスのふるいで素数を生成する"),
+            1.0
+        );
     }
 
     #[test]

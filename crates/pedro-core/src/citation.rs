@@ -64,15 +64,34 @@ pub struct Citation {
     /// parsed without the book's text to look in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageLocation>,
+    /// Which book the page is in, when the passage was found in one. Absent on
+    /// citations stored before a conversation could span several books, which
+    /// is why the reader's old conversations still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book: Option<CitedBook>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
-/// The book a citation is looked up in.
+/// A book a citation may be looked up in.
 #[derive(Debug, Clone, Copy)]
 pub struct BookText<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
     pub full_text: &'a str,
     pub page_count: u32,
+}
+
+/// Which book a citation was found in.
+///
+/// Carried on the citation rather than left to the caller, because a question
+/// put to a shelf is answered from several books at once and "page 120" is not
+/// a place until it says page 120 of what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitedBook {
+    pub id: String,
+    pub title: String,
 }
 
 /// A quoted block, each opening mark closed by its own kind so a passage that
@@ -119,7 +138,7 @@ pub fn strip_sources(content: &str) -> String {
 ///
 /// Book sources are resolved to a page when `book` is given; without it they
 /// carry neither a page nor a reason, because nothing was looked up.
-pub fn parse_citations(response_text: &str, book: Option<BookText<'_>>) -> Vec<Citation> {
+pub fn parse_citations(response_text: &str, books: &[BookText<'_>]) -> Vec<Citation> {
     let Some(sources) = SOURCES_SECTION.captures(response_text) else {
         return Vec::new();
     };
@@ -137,14 +156,16 @@ pub fn parse_citations(response_text: &str, book: Option<BookText<'_>>) -> Vec<C
                     kind: CitationKind::Web,
                     text: describe_web_source(content, &url),
                     page: None,
+                    book: None,
                     url: Some(url),
                 },
                 None => {
                     let quoted = extract_quoted_text(content);
+                    let (page, book) = locate(&quoted, books);
                     Citation {
                         id,
-                        page: book
-                            .map(|book| find_page_number(&quoted, book.full_text, book.page_count)),
+                        page,
+                        book,
                         kind: CitationKind::Pdf,
                         text: quoted,
                         url: None,
@@ -153,6 +174,37 @@ pub fn parse_citations(response_text: &str, book: Option<BookText<'_>>) -> Vec<C
             }
         })
         .collect()
+}
+
+/// Finds which of `books` a quotation is in, and where.
+///
+/// The first book that holds it wins. A passage quoted from a shelf could in
+/// principle be in two of its books — a quotation of a standard, an epigraph —
+/// and picking the first is the same answer the reader would get by opening
+/// them in order; the alternative is showing them two places for one source,
+/// which is worse than showing them one of two.
+///
+/// A quotation in none of them reports the miss from the first book, which is
+/// the reason the reader can act on: the model reworded the passage.
+fn locate(quoted: &str, books: &[BookText<'_>]) -> (Option<PageLocation>, Option<CitedBook>) {
+    let mut first_miss = None;
+
+    for book in books {
+        match find_page_number(quoted, book.full_text, book.page_count) {
+            found @ PageLocation::Found(_) => {
+                return (
+                    Some(found),
+                    Some(CitedBook {
+                        id: book.id.to_owned(),
+                        title: book.title.to_owned(),
+                    }),
+                );
+            }
+            missed => first_miss = first_miss.or(Some(missed)),
+        }
+    }
+
+    (first_miss, None)
 }
 
 fn url_outside_quotes(entry: &str) -> Option<String> {
@@ -315,10 +367,23 @@ mod tests {
         pages.join(&PAGE_DELIMITER.to_string())
     }
 
-    fn book<'a>(full_text: &'a str, page_count: u32) -> Option<BookText<'a>> {
-        Some(BookText {
+    const TITLE: &str = "A Book";
+
+    fn book<'a>(full_text: &'a str, page_count: u32) -> [BookText<'a>; 1] {
+        [BookText {
+            id: "book-1",
+            title: TITLE,
             full_text,
             page_count,
+        }]
+    }
+
+    /// The book a found page is in. Every one-book test looks it up in the same
+    /// book, so a citation that found its page names that one.
+    fn from_book(page: Option<PageLocation>) -> Option<CitedBook> {
+        matches!(page, Some(PageLocation::Found(_))).then(|| CitedBook {
+            id: "book-1".to_owned(),
+            title: TITLE.to_owned(),
         })
     }
 
@@ -327,6 +392,7 @@ mod tests {
             id: id.to_owned(),
             kind: CitationKind::Pdf,
             text: text.to_owned(),
+            book: from_book(page),
             page,
             url: None,
         }
@@ -338,6 +404,7 @@ mod tests {
             kind: CitationKind::Web,
             text: text.to_owned(),
             page: None,
+            book: None,
             url: Some(url.to_owned()),
         }
     }
@@ -426,7 +493,7 @@ mod tests {
             let response = "エッジで動きます[1]\n\n## Sources\n[1] 「エッジはサーバーレス実行基盤です」（本書 第3章 3.1）";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 3)),
+                parse_citations(response, &book(&full_text, 3)),
                 vec![pdf("1", "エッジはサーバーレス実行基盤です", found(3))]
             );
         }
@@ -442,7 +509,7 @@ mod tests {
                 "本文[1]\n\n## Sources\n[1] 「Workersはグローバルネットワークで動きます」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 3)),
+                parse_citations(response, &book(&full_text, 3)),
                 vec![pdf(
                     "1",
                     "Workersはグローバルネットワークで動きます",
@@ -461,7 +528,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「TLSハンドシェイク処理では、クライアント／サーバ間でのラウンドトリップが発生するため、一定の時間が必要となります」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![pdf(
                     "1",
                     "TLSハンドシェイク処理では、クライアント／サーバ間でのラウンドトリップが発生するため、一定の時間が必要となります",
@@ -478,7 +545,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「この文は本文に存在しません」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![pdf(
                     "1",
                     "この文は本文に存在しません",
@@ -497,7 +564,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「public、private」の節：「public、privateはキャッシュを共有キャッシュとして扱ってよいかの指定に使います」「privateであってほしいものにはprivateを付けるようにしておきましょう」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 3)),
+                parse_citations(response, &book(&full_text, 3)),
                 vec![pdf(
                     "1",
                     "privateであってほしいものにはprivateを付けるようにしておきましょう",
@@ -518,7 +585,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「キャッシュ制御ヘッダの設計と運用における注意点」の節：「privateは必ず指定します」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 3)),
+                parse_citations(response, &book(&full_text, 3)),
                 vec![pdf("1", "privateは必ず指定します", found(3))]
             );
         }
@@ -532,7 +599,7 @@ mod tests {
                 "本文[1]\n\n## Sources\n[1] \"The runtime doesn't ship a native canvas\"";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![pdf(
                     "1",
                     "The runtime doesn't ship a native canvas",
@@ -547,7 +614,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] Cloudflare Docs - https://developers.cloudflare.com/workers/";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "Cloudflare Docs",
@@ -562,7 +629,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] \"BFF looks up session in KV, retrieves access token\" — GitHub - neilpmas/bezzie: BFF OAuth 2.0 auth library for Cloudflare Workers (https://github.com/neilpmas/bezzie)";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "BFF looks up session in KV, retrieves access token",
@@ -577,7 +644,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] \"A Worker-based BFF works best when the gateway owns client-facing routes\" - OneUptime Blog「Backend for Frontend Pattern」 https://raw.githubusercontent.com/OneUptime/blog/refs/heads/master/README.md";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "A Worker-based BFF works best when the gateway owns client-facing routes",
@@ -592,7 +659,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] \"Forwards these authenticated requests to the Hono API via service binding\" — Cloudflare Vite Plugin for React Router v7 · Issue #8958 — https://github.com/cloudflare/workers-sdk/issues/8958";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "Forwards these authenticated requests to the Hono API via service binding",
@@ -609,7 +676,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] GitHub - neilpmas/bezzie: BFF OAuth 2.0 auth library for Cloudflare Workers (https://github.com/neilpmas/bezzie)";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "GitHub - neilpmas/bezzie: BFF OAuth 2.0 auth library for Cloudflare Workers",
@@ -626,7 +693,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 計算コストの比較（ハッシュ計算は高コスト、ファイル属性の読み取りは低コスト） - https://raw.githubusercontent.com/Alessandro-Pang/fe-interview/refs/heads/main/content/docs/network/network-14.md";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![web(
                     "1",
                     "計算コストの比較（ハッシュ計算は高コスト、ファイル属性の読み取りは低コスト）",
@@ -646,7 +713,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「詳細は https://developers.cloudflare.com/workers/ を参照してください」（本書 4.2）";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 2)),
+                parse_citations(response, &book(&full_text, 2)),
                 vec![pdf(
                     "1",
                     "詳細は https://developers.cloudflare.com/workers/ を参照してください",
@@ -666,7 +733,7 @@ mod tests {
             let response = "本文[1]\n\n## Sources\n[1] 「目的の文」";
 
             assert_eq!(
-                parse_citations(response, book(&full_text, 3)),
+                parse_citations(response, &book(&full_text, 3)),
                 vec![pdf("1", "目的の文", found(2))]
             );
         }
@@ -674,16 +741,13 @@ mod tests {
         #[test]
         fn gives_a_citation_neither_a_page_nor_a_reason_without_the_books_text() {
             let response = "本文[1]\n\n## Sources\n[1] 「引用」";
-            assert_eq!(
-                parse_citations(response, None),
-                vec![pdf("1", "引用", None)]
-            );
+            assert_eq!(parse_citations(response, &[]), vec![pdf("1", "引用", None)]);
         }
 
         #[test]
         fn returns_no_citations_when_the_answer_has_no_sources_section() {
             let full_text = full_text_of(&["本文"]);
-            assert!(parse_citations("出典のない回答です", book(&full_text, 1)).is_empty());
+            assert!(parse_citations("出典のない回答です", &book(&full_text, 1)).is_empty());
         }
     }
 

@@ -38,11 +38,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    for passage in store.passages_for(&book.id, &question, PASSAGES)? {
-        let text: String = passage.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    for passage in store.passages_for(std::slice::from_ref(&book.id), &question, PASSAGES)? {
+        let text: String = passage
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let text: String = text.chars().take(120).collect();
 
-        println!("p.{:<5} {:.3}\n  {text}…\n", passage.page_number, passage.score);
+        println!(
+            "p.{:<5} {:.3}\n  {text}…\n",
+            passage.page_number, passage.score
+        );
     }
 
     Ok(())
