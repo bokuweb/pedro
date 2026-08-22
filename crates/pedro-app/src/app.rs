@@ -73,6 +73,12 @@ fn following(answering: bool, follows: bool, at_foot: bool) -> (bool, bool) {
 /// does not read as the reader scrolling away.
 const NEARLY_THE_FOOT: f32 = 24.;
 
+/// The space between two facing pages. Narrow on purpose: a spread is one
+/// picture of one sheet of paper, and a gutter as wide as the gap between rows
+/// reads as two documents side by side. Here rather than in the reader because
+/// fitting a spread to the window has to allow for it too.
+pub(crate) const SEAM: f32 = 2.;
+
 /// How tall a page is drawn at 100%, in logical pixels.
 ///
 /// A page fills a comfortable window at this size. It is not fitted to the
@@ -194,6 +200,15 @@ pub struct Pedro {
     pub(crate) drive_busy: bool,
     /// Where the open shelf's name is edited.
     pub(crate) shelf_name: Entity<InputState>,
+    /// How wide the reader is, as the last frame laid it out.
+    ///
+    /// Recorded rather than asked for, because the height a page is drawn at
+    /// has to be the same number in three places — the row, the page, and the
+    /// raster — and only one of them is in a position to measure a window.
+    pub(crate) reader_width: f32,
+    /// The layout the last frame drew, so a window crossing the width two pages
+    /// need is noticed rather than silently losing the reader's place.
+    showing: Layout,
     /// What the composer is currently telling the reader it will ask about.
     ///
     /// Kept here so that following the tab costs one comparison a frame rather
@@ -261,6 +276,8 @@ impl Pedro {
             composer,
             shelf_name,
             composer_hint: ASK_A_DOCUMENT,
+            reader_width: 0.,
+            showing: Layout::Single,
             web_search: true,
             active_rail: RailItem::Library,
             collapsed: HashSet::new(),
@@ -2072,11 +2089,39 @@ impl Pedro {
     }
 
     /// How tall a page is drawn right now.
-    /// How the pages of the open book are laid out.
-    pub(crate) fn layout(&self) -> Layout {
+    /// How the reader asked for the open book to be laid out.
+    pub(crate) fn chosen_layout(&self) -> Layout {
         self.open_document()
             .map(|open| open.layout)
             .unwrap_or_default()
+    }
+
+    /// How it is actually drawn, which is what there is room for.
+    ///
+    /// Two pages side by side are twice as wide as one, and the window does not
+    /// grow to meet them. Drawn anyway, a spread runs off the right edge and
+    /// the reader loses the half they were meant to be given; shrunk to fit, it
+    /// gets smaller the narrower the window is, which is the wrong thing to
+    /// take away from a reader who is short of room. So a window with no room
+    /// for two pages shows one, and shows two again when there is room —
+    /// zooming out is another way to make room.
+    pub(crate) fn layout(&self) -> Layout {
+        match self.chosen_layout().is_spread() && self.spread_fits() {
+            true => Layout::Spread,
+            false => Layout::Single,
+        }
+    }
+
+    /// Whether two pages fit side by side at the size a page is drawn.
+    fn spread_fits(&self) -> bool {
+        let Some(open) = self.open_document() else {
+            return false;
+        };
+
+        // Measured against the first page, like every other page is.
+        let wanted = open.width_of(1, self.page_height()) * 2. + SEAM;
+
+        self.reader_width > 0. && wanted <= self.reader_width
     }
 
     /// Shows the pages one at a time or two, and remembers which per book.
@@ -2086,7 +2131,8 @@ impl Pedro {
         };
 
         open.layout = open.layout.toggled();
-        let (page, layout) = (open.page, open.layout);
+        let page = open.page;
+        let layout = self.layout();
 
         // The list is keyed by the layout, so the new one starts unscrolled;
         // put it back on the page the reader was reading.
@@ -2322,6 +2368,46 @@ impl Pedro {
         cx.notify();
     }
 
+    /// Works out how much width the reader has, from the window and the panes
+    /// beside it. Their widths are the animated ones, so a spread keeps fitting
+    /// while a panel is sliding open.
+    fn measure_reader(&mut self, window: &Window) {
+        let sidebar = match self.sidebar.is_visible() {
+            true => self.sidebar.width,
+            false => 0.,
+        };
+        let chat = match self.chat_pane.is_visible() {
+            true => self.chat_pane.width,
+            false => 0.,
+        };
+
+        self.reader_width = (f32::from(window.viewport_size().width) - sidebar - chat).max(0.);
+
+        // A window that has just crossed the width two pages need lays the book
+        // out in a different number of rows, and the list is keyed by that — so
+        // it starts again at the top unless it is put back on the page the
+        // reader was reading.
+        let showing = self.layout();
+        if showing != self.showing {
+            tracing::debug!(
+                spread = showing.is_spread(),
+                chosen = self.chosen_layout().is_spread(),
+                reader = self.reader_width,
+                page = self
+                    .open_document()
+                    .map(|open| open.width_of(1, self.page_height())),
+                "the layout changed"
+            );
+            self.showing = showing;
+
+            if let Some(page) = self.open_document().map(|open| open.page)
+                && let Some(scroll) = self.page_scroll()
+            {
+                scroll.scroll_to_item(showing.row(page), ScrollStrategy::Top);
+            }
+        }
+    }
+
     /// Keeps the composer's prompt on the same subject as the tab.
     fn follow_the_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = match self.active_shelf().is_some() {
@@ -2356,6 +2442,7 @@ impl Render for Pedro {
         self.write_a_little_more(window);
         self.slide_panes(window);
         self.follow_the_tab(window, cx);
+        self.measure_reader(window);
 
         v_flex()
             .id("pedro")

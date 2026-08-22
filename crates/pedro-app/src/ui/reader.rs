@@ -32,10 +32,7 @@ use crate::ui::icon;
 /// The space between one row and the next.
 const GAP: f32 = 20.;
 
-/// The space between two facing pages. Narrow on purpose: a spread is one
-/// picture of one sheet of paper, and a gutter as wide as the gap between rows
-/// reads as two documents side by side.
-const SEAM: f32 = 2.;
+use crate::app::SEAM;
 
 impl Pedro {
     pub(crate) fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

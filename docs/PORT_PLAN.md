@@ -244,6 +244,14 @@ for a row rather than assuming the page number is one.
 The layout is stored per book rather than per reader, because it is a property
 of the book: a scanned spread wants it and a slide deck does not.
 
+**Two pages need twice the width, and the window does not grow to meet them.**
+A spread drawn at the size a single page had runs off the right edge; shrunk to
+fit, it gets smaller the narrower the window is, which is the wrong thing to
+take from a reader who is already short of room. So a window with no room for
+two pages shows one, and shows two again when there is room — closing a panel or
+zooming out is another way to make room. What the reader asked for is what is
+remembered; what there is room for is what is drawn.
+
 **What this cost, and what it turned up.** The first version answered "page 1"
 for a row past the end of the book. The scrolling list measures itself with
 ranges beyond the last row, every frame — so every frame the reader was reported
