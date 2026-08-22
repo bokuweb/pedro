@@ -138,38 +138,57 @@ search answer *nothing*:
 The result is that a question about primes carries the pages about primes
 (`cargo run -p pedro-core --example context -- "…"`).
 
-### What keyword search still gets wrong
+### Two cuts of the same passages
 
-A bigram query is joined with OR, because a segmented phrase rarely matches in
-full — and bm25 then lets filler accumulate. A long question is mostly
-particles, and a page matching fifteen common bigrams outranks the page holding
-the two words the question was actually about. Searching for `runtime` finds the
-right book at once; asking 「runtime が edge で動くという話はどの本?」 does not
-reach it, because forty fragments of the question drown two words of it.
+The index holds each passage cut two ways, because two different questions are
+put to it.
 
-Two filters were tried against this and both were measured to be worse than
-none:
+**Character pairs** are how a search for a string finds it inside a longer word:
+京駅 finds 東京駅 only if both were cut into the same pairs. That is what a
+search box is for.
 
-- **How much of the question a passage holds.** Fails by length: a passage that
-  answers a forty-token question still only holds a twentieth of it, so a
-  threshold that is right for a phrase throws away every answer to a sentence.
-- **The rarest half of the question's words.** Fails by subject: in a book about
-  primes, 素数 is one of the *commonest* words in the index, so "rarest half"
-  discards exactly the word the question is about.
+**Content words** — runs of kanji, runs of katakana, latin words — are how a
+question finds what it is about. Japanese writes its content in kanji and
+katakana and its grammar in hiragana, so the script boundary is a usable word
+boundary without a dictionary: 「素数はどうやって生成する?」 cuts to 素数 and
+生成, and the grammar is not in the query at all.
 
-What both attempts have in common is treating a term's weight as something a
-caller can recover after ranking. It is not: bm25 already knows every term's
-weight and spends it, and the fix belongs where the ranking is — capping what
-low-information terms can contribute, or segmenting Japanese into words rather
-than into pairs. Until then the retrieval is ungated, because missing the
-passage that answers the question is a worse failure than carrying one that does
-not.
+The second cut exists because the first cannot be repaired by weighting. Pairs
+manufacture tokens that are rare and meaningless at once, and rarity is the only
+thing a weighting has to go on:
 
-`vec0` measures in L2 unless asked otherwise, and for normalised vectors that is
-`sqrt(2 - 2·cos)` — a real distance, but not one a similarity can be read off by
-subtracting from one. It is asked for cosine, and a table built before it was
-asked is rebuilt rather than reused, because reading old distances as cosines
-would rank a book backwards.
+| token | passages (of 1,836) | idf |
+| --- | --- | --- |
+| 動く | 0 | 7.52 |
+| の本 | 1 | 6.82 |
+| で動 | 6 | 5.57 |
+| **runtime** | **30** | **4.08** |
+| 素数 | 79 | 3.13 |
+
+Asking 「runtime が edge で動くという話はどの本?」, the fragments of the grammar
+outrank the two words the question is about, and bm25 is right to think so:
+they *are* rarer. Two filters were tried on top of this and both were measured
+worse than none — one failed by length, one failed by subject — before the
+numbers above showed why neither could work. Cut into content words, the same
+question retrieves the right book first, out of two.
+
+What the second cut loses is a content word written in hiragana — ふるい,
+できる. The pairs are still there beside it, and a question with no content
+words at all falls back to them. A question that *has* them and matches nothing
+does not fall back: it has its answer.
+
+### What retrieval still gets wrong
+
+A single kanji is a word only by accident — 決める, 動く, 話す all reduce to
+one — so those are dropped from a question that has something longer to go on,
+and kept when they are all it has. A question of nothing but verbs is still
+poorly served.
+
+Fusing the two rankings by position is what makes a passage both ways of looking
+agree on come first. That only works if both lists go in whole: dropping the
+overlap from one side to avoid repeating it scores the passage they both ranked
+first as though only one had, and a table of contents that one side liked takes
+its place.
 
 ### Shelves: a question put to several books at once
 

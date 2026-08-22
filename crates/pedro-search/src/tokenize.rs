@@ -169,3 +169,133 @@ mod tests {
         assert_eq!(for_index(""), "");
     }
 }
+
+/// Whether a character is one Japanese writes content in.
+///
+/// Japanese writes its content in kanji and katakana and its grammar in
+/// hiragana, which is what makes a script boundary a usable word boundary
+/// without a dictionary.
+fn script_of(c: char) -> Script {
+    match c {
+        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}' => {
+            Script::Kanji
+        }
+        '\u{30A0}'..='\u{30FF}' | '\u{FF66}'..='\u{FF9F}' => Script::Katakana,
+        c if c.is_alphanumeric() && c.is_ascii() => Script::Latin,
+        _ => Script::Other,
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Script {
+    Kanji,
+    Katakana,
+    Latin,
+    Other,
+}
+
+/// The content words of `text`: runs of kanji, runs of katakana, latin words.
+///
+/// The other tokenizer cuts everything into character pairs, which finds a word
+/// inside a longer one but manufactures tokens that are rare and meaningless at
+/// once — 「で動」 spans a particle and a verb, occurs in six passages of a
+/// library of 1,836, and means nothing. No weighting can tell that from 「素数」,
+/// which occurs in seventy-nine, because to a weighting they are the same shape.
+/// Splitting on the script boundary can: it drops the grammar and keeps the
+/// subject.
+///
+/// What this loses is a content word written in hiragana — ふるい, できる. The
+/// pairs are still indexed beside these, and searching for a string still uses
+/// them; this is for finding what a question is *about*.
+pub fn content(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut run = String::new();
+    let mut script = Script::Other;
+
+    for character in text.chars() {
+        let this = script_of(character);
+        if this != script && !run.is_empty() {
+            words.push(std::mem::take(&mut run).to_lowercase());
+        }
+
+        script = this;
+        if this != Script::Other {
+            run.push(character);
+        }
+    }
+
+    if !run.is_empty() {
+        words.push(run.to_lowercase());
+    }
+
+    words
+}
+
+/// The content words of `text` as one string, for the index.
+pub fn content_for_index(text: &str) -> String {
+    content(text).join(" ")
+}
+
+/// The content words of a question, as an FTS5 query.
+///
+/// A verb's stem is one kanji — 決める, 動く, 話す — and one kanji is a word
+/// only by accident: asking 「鍵長はどうやって決める?」 with 決 in the query
+/// matched every 決して in the library and ranked them above the pages about key
+/// length. Single characters are dropped where the question has something longer
+/// to go on, and kept where they are all it has.
+pub fn content_query(text: &str) -> String {
+    let mut words = content(text);
+    if words.iter().any(|word| word.chars().count() > 1) {
+        words.retain(|word| word.chars().count() > 1);
+    }
+
+    let borrowed: Vec<&str> = words.iter().map(String::as_str).collect();
+    as_query(&borrowed)
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::{content, content_query};
+
+    #[test]
+    fn grammar_is_dropped_and_the_subject_kept() {
+        assert_eq!(content("素数はどうやって生成する?"), vec!["素数", "生成"]);
+    }
+
+    #[test]
+    fn a_katakana_word_is_one_word() {
+        assert_eq!(
+            content("エラトステネスのふるいで素数を生成する"),
+            vec!["エラトステネス", "素数", "生成"]
+        );
+    }
+
+    #[test]
+    fn latin_words_survive_the_japanese_around_them() {
+        assert_eq!(
+            content("runtime が edge で動くという話はどの本?"),
+            vec!["runtime", "edge", "動", "話", "本"]
+        );
+    }
+
+    #[test]
+    fn a_query_drops_the_single_characters_it_can_afford_to() {
+        assert_eq!(
+            content_query("runtime が edge で動くという話はどの本?"),
+            "\"runtime\" OR \"edge\""
+        );
+    }
+
+    /// A question that is nothing but single characters still asks something.
+    #[test]
+    fn a_query_of_single_characters_keeps_them() {
+        assert_eq!(content_query("本と鍵"), "\"本\" OR \"鍵\"");
+    }
+
+    /// Nothing to go on rather than a query that matches everything.
+    #[test]
+    fn a_question_written_only_in_hiragana_has_no_content_words() {
+        assert!(content("これはどうですか").is_empty());
+        assert!(content_query("これはどうですか").is_empty());
+    }
+}

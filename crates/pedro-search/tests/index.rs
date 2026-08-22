@@ -296,3 +296,175 @@ fn a_table_built_for_another_metric_is_rebuilt() {
         .expect("a declaration");
     assert!(sql.contains("distance_metric=cosine"), "{sql}");
 }
+
+/// A question's grammar must not decide its answer.
+///
+/// Cut into character pairs, 「で動」 and 「の本」 are rarer than the words the
+/// question is about, so a passage matching the grammar outranks the passage
+/// that holds the subject. Cut into content words, the grammar is not in the
+/// query at all.
+#[test]
+fn a_question_is_matched_on_what_it_is_about() {
+    let mut connection = library();
+    index::index_book(
+        &mut connection,
+        "book-a",
+        &[
+            chunk(
+                1,
+                0,
+                "the runtime executes at the edge, close to the reader",
+            ),
+            chunk(
+                2,
+                1,
+                "この章では別の話題を扱いますが、本を動かす話ではありません",
+            ),
+        ],
+    )
+    .expect("indexed");
+
+    let about = index::search_about(&connection, "runtime が edge で動くという話はどの本?", 10)
+        .expect("a search");
+
+    assert_eq!(about.len(), 1, "{about:?}");
+    assert_eq!(about[0].page_number, 1);
+}
+
+/// The search box keeps finding a string inside a longer word, which is what
+/// the character pairs are for and what content words cannot do.
+#[test]
+fn a_search_still_finds_a_word_inside_a_word() {
+    let mut connection = library();
+    index::index_book(&mut connection, "book-a", &[chunk(3, 0, "東京駅から歩く")])
+        .expect("indexed");
+
+    assert_eq!(
+        index::search(&connection, "京駅", 10)
+            .expect("a search")
+            .len(),
+        1
+    );
+}
+
+/// A question written entirely in hiragana has no content words, and says so
+/// rather than matching everything.
+#[test]
+fn a_question_with_no_content_words_finds_nothing() {
+    let mut connection = library();
+    index::index_book(
+        &mut connection,
+        "book-a",
+        &[chunk(1, 0, "エラトステネスのふるいで素数を生成する")],
+    )
+    .expect("indexed");
+
+    let found = index::search_about(&connection, "これはどうですか", 10).expect("a search");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// An index built before there was a content column is rebuilt from the
+/// passages, which keep their ids — and so keep the vectors that are keyed by
+/// them, which cost forty seconds to make.
+#[test]
+fn an_index_without_content_words_is_rebuilt_from_its_passages() {
+    let mut connection = library();
+    index::index_book(
+        &mut connection,
+        "book-a",
+        &[chunk(1, 0, "素数を生成するアルゴリズム")],
+    )
+    .expect("indexed");
+
+    let ids_before: Vec<String> = connection
+        .prepare("SELECT id FROM chunks ORDER BY ord")
+        .expect("a query")
+        .query_map([], |row| row.get(0))
+        .expect("ids")
+        .collect::<Result<_, _>>()
+        .expect("ids");
+
+    // The index as it stood before content words: one column.
+    connection
+        .execute_batch(
+            "DROP TABLE chunks_fts;
+             CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                 tokens, tokenize='unicode61 remove_diacritics 2'
+             );",
+        )
+        .expect("the old index");
+
+    let rebuilt = index::rebuild_text(&mut connection).expect("a rebuild");
+    assert_eq!(rebuilt, 1);
+
+    let ids_after: Vec<String> = connection
+        .prepare("SELECT id FROM chunks ORDER BY ord")
+        .expect("a query")
+        .query_map([], |row| row.get(0))
+        .expect("ids")
+        .collect::<Result<_, _>>()
+        .expect("ids");
+    assert_eq!(ids_before, ids_after, "the passages were re-cut");
+
+    // And both ways of asking work against the rebuilt index.
+    assert_eq!(
+        index::search(&connection, "素数", 10)
+            .expect("a search")
+            .len(),
+        1
+    );
+    assert_eq!(
+        index::search_about(&connection, "素数はどう生成する?", 10)
+            .expect("a search")
+            .len(),
+        1
+    );
+}
+
+/// The two cuts are genuinely different indexes, and each answers only for
+/// itself.
+///
+/// 東京駅 is one content word and two character pairs. Searching for 京駅 finds
+/// it through the pairs and must not find it through the words — if the column
+/// filter were wrong, this would pass either way, and the pairs would be
+/// answering questions the words were asked.
+#[test]
+fn each_cut_answers_only_for_itself() {
+    let mut connection = library();
+    index::index_book(&mut connection, "book-a", &[chunk(1, 0, "東京駅から歩く")])
+        .expect("indexed");
+
+    assert_eq!(
+        index::search(&connection, "京駅", 10)
+            .expect("a search")
+            .len(),
+        1,
+        "the pairs lost a search inside a word"
+    );
+    assert!(
+        index::search_about(&connection, "京駅", 10)
+            .expect("a search")
+            .is_empty(),
+        "the words answered for the pairs"
+    );
+
+    // And the whole word is found either way.
+    assert_eq!(
+        index::search_about(&connection, "東京駅はどこ?", 10)
+            .expect("a search")
+            .len(),
+        1
+    );
+}
+
+/// Finding nothing and being unable to read the question look alike and mean
+/// opposite things, so the caller is told which it is.
+#[test]
+fn a_question_says_whether_it_had_anything_to_ask_about() {
+    assert!(index::asks_about_anything("素数はどうやって生成する?"));
+    assert!(index::asks_about_anything("runtime が edge で動く?"));
+    assert!(index::asks_about_anything("本と鍵"));
+
+    assert!(!index::asks_about_anything("これはどうですか"));
+    assert!(!index::asks_about_anything(""));
+}
