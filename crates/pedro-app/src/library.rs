@@ -70,6 +70,97 @@ impl Library {
         }
     }
 
+    /// The shelves standing on one shelf, or the ones at the top level.
+    ///
+    /// In the order the store returned them, which is the order they were made
+    /// in: a list that reorders itself is a list read twice.
+    pub fn shelves_on(&self, parent: Option<&str>) -> Vec<&Folder> {
+        self.shelves()
+            .iter()
+            .filter(|shelf| shelf.parent_id.as_deref() == parent)
+            .collect()
+    }
+
+    pub fn shelf(&self, shelf_id: &str) -> Option<&Folder> {
+        self.shelves().iter().find(|shelf| shelf.id == shelf_id)
+    }
+
+    /// The shelves this one stands on, outermost first.
+    pub fn ancestors_of(&self, shelf_id: &str) -> Vec<&Folder> {
+        let mut path = Vec::new();
+        let mut at = self
+            .shelf(shelf_id)
+            .and_then(|shelf| shelf.parent_id.as_deref());
+
+        while let Some(parent) = at {
+            let Some(shelf) = self.shelf(parent) else {
+                break;
+            };
+
+            path.push(shelf);
+            if path.len() > self.shelves().len() {
+                break;
+            }
+            at = shelf.parent_id.as_deref();
+        }
+
+        path.reverse();
+        path
+    }
+
+    /// A shelf named by the whole way down to it, for the places that list
+    /// shelves out of the tree: two shelves called "later" on two different
+    /// shelves are only told apart by what they stand on.
+    pub fn path_of(&self, shelf_id: &str) -> SharedString {
+        let Some(shelf) = self.shelf(shelf_id) else {
+            return SharedString::default();
+        };
+
+        let mut path = String::new();
+        for above in self.ancestors_of(shelf_id) {
+            path.push_str(&above.name);
+            path.push_str(" / ");
+        }
+        path.push_str(&shelf.name);
+
+        path.into()
+    }
+
+    /// The books a question to a shelf is answered from: the ones on it and on
+    /// every shelf under it. The same set the store reads, gathered from what
+    /// is already in hand so that drawing the panel costs no lock.
+    pub fn books_under(&self, shelf_id: &str) -> Vec<&Book> {
+        let mut shelves = vec![shelf_id.to_owned()];
+        let mut under: Vec<&str> = Vec::new();
+
+        while let Some(shelf) = shelves.pop() {
+            if under.iter().any(|seen| *seen == shelf) {
+                continue;
+            }
+
+            let shelf = match self.shelves().iter().find(|it| it.id == shelf) {
+                Some(shelf) => shelf,
+                None => continue,
+            };
+
+            under.push(&shelf.id);
+            shelves.extend(
+                self.shelves_on(Some(&shelf.id))
+                    .into_iter()
+                    .map(|child| child.id.clone()),
+            );
+        }
+
+        self.books()
+            .iter()
+            .filter(|book| {
+                book.folder_id
+                    .as_deref()
+                    .is_some_and(|on| under.contains(&on))
+            })
+            .collect()
+    }
+
     pub fn store(&self) -> Option<&SharedStore> {
         match self {
             Library::Ready { store, .. } => Some(store),

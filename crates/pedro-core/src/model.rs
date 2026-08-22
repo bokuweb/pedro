@@ -91,16 +91,22 @@ pub struct ChatMessage {
 
 /// A shelf: books gathered so they can be asked about together.
 ///
-/// Flat on purpose. A shelf is the unit a question is put to, and a question
-/// put to a tree would have to say how deep it goes — which is a thing to
-/// explain, and a thing to get wrong, in return for an arrangement most
-/// libraries this size never need.
+/// Shelves nest, up to [`MAX_SHELF_DEPTH`](crate::store::MAX_SHELF_DEPTH)
+/// levels. A question put to a tree has to say how deep it goes, so it says the
+/// only thing a reader would expect it to: a shelf is asked with everything
+/// under it. That rule is one sentence at any depth, which is what makes the
+/// arrangement worth having; the cap is there so it stays a shelf of shelves
+/// rather than a filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
     pub id: String,
     pub name: String,
+    /// The shelf this one sits on, if it is not at the top level.
+    pub parent_id: Option<String>,
     pub created_at: OffsetDateTime,
-    /// How many books are on it, which is what the sidebar shows.
+    /// How many books a question to it is answered from: the books on it and
+    /// on every shelf under it. It is what the sidebar shows, so the number
+    /// beside a shelf is the number of books it will read.
     pub book_count: u32,
 }
 

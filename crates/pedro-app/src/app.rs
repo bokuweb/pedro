@@ -702,7 +702,16 @@ impl Pedro {
 
     /// Makes a shelf and opens it, so the reader lands somewhere they can name
     /// it and put something on it rather than on a row that has just appeared.
-    pub(crate) fn create_shelf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// With a `parent` it stands on that shelf, which is where the plus on a
+    /// shelf header makes one. The store is what decides whether there is room
+    /// for it; this only reports what it said.
+    pub(crate) fn create_shelf(
+        &mut self,
+        parent: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = self.library.store() else {
             return;
         };
@@ -712,9 +721,15 @@ impl Pedro {
         let taken = self.library.shelves().len();
         let name = format!("Shelf {}", taken + 1);
 
-        let made = store.lock().create_folder(&name);
+        let made = store.lock().create_folder(&name, parent.as_deref());
         match made {
             Ok(shelf) => {
+                // A shelf made inside a shut one would arrive somewhere the
+                // reader cannot see it.
+                if let Some(parent) = parent {
+                    self.reveal_shelf(&parent, cx);
+                }
+
                 self.reload_shelves(cx);
                 self.open_shelf(&shelf.id, &shelf.name, window, cx);
             }
@@ -723,6 +738,57 @@ impl Pedro {
                 self.notice = Some(err.to_string().into());
                 cx.notify();
             }
+        }
+    }
+
+    /// Puts a shelf on another one, or takes it back to the top level.
+    ///
+    /// Refused moves — into itself, or deeper than shelves go — come back as
+    /// the notice under the search box rather than as nothing happening, since
+    /// a drop that lands and does nothing reads as a drop that missed.
+    pub(crate) fn move_shelf(
+        &mut self,
+        shelf_id: &str,
+        parent: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+
+        if let Err(err) = store.lock().move_folder(shelf_id, parent) {
+            tracing::warn!(%err, "could not move a shelf");
+            self.notice = Some(err.to_string().into());
+            cx.notify();
+            return;
+        }
+
+        self.notice = None;
+        if let Some(parent) = parent {
+            self.reveal_shelf(parent, cx);
+        }
+
+        self.reload_shelves(cx);
+    }
+
+    /// Opens a shelf's section in the sidebar, so that what just landed on it
+    /// is somewhere the reader can see.
+    ///
+    /// Sections are collapsed by index into the panel, and the panel is rebuilt
+    /// from the shelves as they are now — so this is read after the move, from
+    /// the arrangement the move produced.
+    fn reveal_shelf(&mut self, shelf_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.panel().sections.iter().position(|section| {
+            section
+                .shelf
+                .as_ref()
+                .is_some_and(|shelf| shelf == shelf_id)
+        }) else {
+            return;
+        };
+
+        if self.collapsed.remove(&(RailItem::Library, index)) {
+            cx.notify();
         }
     }
 
