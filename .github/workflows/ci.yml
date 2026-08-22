@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch makes the run already in flight pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning nobody reads is a warning that stays. Here they fail the build.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  check:
+    name: clippy and tests
+    # macOS because `pedro-app` is a GPUI application: it compiles Metal
+    # shaders, so it builds nowhere else. The other three crates are
+    # platform-independent and are covered here along with it.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # GPUI compiles its shaders with `xcrun metal`, which only a full Xcode
+      # provides — the Command Line Tools alone fail with `unable to find
+      # utility "metal"`. The runner image has Xcode; this makes sure it is
+      # what `xcrun` reaches for.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      # Nothing links against pdfium at build time, but the `pedro-pdf`
+      # integration tests open real documents and fail rather than skip
+      # without it.
+      - name: Fetch pdfium
+        run: ./scripts/fetch-pdfium.sh
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features
+
+      - name: Tests
+        run: cargo test --locked --workspace --all-features

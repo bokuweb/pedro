@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The claim drawn over the evidence.
     let mut canvas = image::RgbaImage::new(image.width, image.height);
-    for (at, pixel) in image.bytes.chunks_exact(4).enumerate() {
+    for (at, pixel) in image.bytes.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = (at as u32 % image.width, at as u32 / image.width);
         canvas.put_pixel(x, y, image::Rgba([pixel[2], pixel[1], pixel[0], 255]));
     }

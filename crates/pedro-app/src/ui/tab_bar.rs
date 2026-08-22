@@ -27,6 +27,9 @@ const LIGHTS: f32 = 84.;
 /// without a ceiling one of them pushes every other tab out of the row.
 const LABEL_MAX: f32 = 180.;
 
+/// What pressing one of the panel toggles does.
+type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
 impl Pedro {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tabs: Vec<_> = self
@@ -96,7 +99,7 @@ impl Pedro {
         id: &'static str,
         name: IconName,
         what: &'static str,
-        on_click: Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>,
+        on_click: OnClick,
     ) -> impl IntoElement + use<> {
         div()
             .id(id)
