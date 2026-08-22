@@ -854,10 +854,7 @@ impl Pedro {
     /// page, a marked passage reopens the conversation about it.
     pub(crate) fn open_entry(&mut self, entry: &Entry, cx: &mut Context<Self>) {
         // Pressing the row rather than its remove button is an answer too.
-        if self.confirming_removal.is_some() {
-            self.confirming_removal = None;
-            cx.notify();
-        }
+        self.cancel_confirmation(cx);
         self.close_shelf_menu(cx);
 
         if !entry.openable {
@@ -1578,6 +1575,18 @@ impl Pedro {
     pub(crate) fn confirm(&mut self, id: SharedString, cx: &mut Context<Self>) {
         self.confirming_removal = Some(id);
         cx.notify();
+    }
+
+    /// Takes back a question that was asked and not answered.
+    ///
+    /// A reader who presses "Delete" and then goes and does something else has
+    /// changed their mind, and an armed confirmation left standing turns their
+    /// next stray press into a deletion.
+    pub(crate) fn cancel_confirmation(&mut self, cx: &mut Context<Self>) {
+        if self.confirming_removal.is_some() {
+            self.confirming_removal = None;
+            cx.notify();
+        }
     }
 
     /// Opens a book as a tab, the way clicking its sidebar row does.
