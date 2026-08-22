@@ -164,8 +164,10 @@ impl Table {
         let aligned = data.as_ptr().align_offset(align_of::<f32>()) == 0;
         let copied = (!aligned).then(|| {
             tracing::debug!("the embedding table is unaligned; copying it");
-            data.chunks_exact(4)
-                .map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+            data.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|four| f32::from_le_bytes(*four))
                 .collect()
         });
 

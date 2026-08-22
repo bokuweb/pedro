@@ -22,7 +22,7 @@ mod library;
 mod outline;
 mod text;
 
-pub use document::{Document, PageImage, PageSize, PixelFormat};
+pub use document::{Document, PageBox, PageImage, PageSize, PixelFormat};
 pub use library::library_path;
 pub use outline::OutlineItem;
 pub use text::{CharBox, PageText, Rect};

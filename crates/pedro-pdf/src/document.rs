@@ -54,12 +54,16 @@ impl PageImage {
             return;
         }
 
-        for pixel in self.bytes.chunks_exact_mut(4) {
+        for pixel in self.bytes.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         self.format = format;
     }
 }
+
+/// One of a page's declared boxes: its name, then its `(left, bottom, right,
+/// top)` edges in points.
+pub type PageBox = (&'static str, f32, f32, f32, f32);
 
 /// An open document.
 ///
@@ -119,10 +123,7 @@ impl Document {
     /// The first few text segments of a page: what pdfium's own selection API
     /// The page's declared boxes, for working out which space a coordinate is
     /// in. Each is `(left, bottom, right, top)` in points.
-    pub fn page_boxes(
-        &self,
-        index: u32,
-    ) -> Result<Vec<(&'static str, f32, f32, f32, f32)>, PdfError> {
+    pub fn page_boxes(&self, index: u32) -> Result<Vec<PageBox>, PdfError> {
         let _guard = in_use();
         let page = self.page(index)?;
         let boundaries = page.boundaries();
