@@ -19,7 +19,7 @@ use gpui::{
     MouseMoveEvent, ParentElement as _, RenderImage, SharedString, Styled as _, canvas, div, img,
     px, relative, uniform_list,
 };
-use gpui_component::{IconName, h_flex, v_flex};
+use gpui_component::{IconName, Sizable as _, h_flex, spinner::Spinner, v_flex};
 use pedro_pdf::Rect;
 
 use crate::app::Pedro;
@@ -81,25 +81,31 @@ impl Pedro {
         // first page's proportions, and a mark drawn in fractions of a
         // stretched page does not sit on its words.
         let width = open.width_of(page, height);
-        let marks: Vec<Rect> = open
-            .highlights_on(page)
-            .flat_map(|highlight| highlight.rects.iter().copied())
-            .collect();
+        let sheet = match open.page(page) {
+            Some(held) => {
+                let marks: Vec<Rect> = open
+                    .highlights_on(page)
+                    .flat_map(|highlight| highlight.rects.iter().copied())
+                    .collect();
 
-        let sheet = render_sheet(
-            width,
-            height,
-            open.page(page).map(|held| held.image.clone()),
-            marks,
-            open.selection_rects(page),
-        );
+                render_sheet(
+                    width,
+                    height,
+                    held.image.clone(),
+                    marks,
+                    open.selection_rects(page),
+                )
+                .into_any_element()
+            }
+            None => render_pending(width, height).into_any_element(),
+        };
 
         h_flex()
             .h(px(height + GAP))
             .w_full()
             .justify_center()
             .items_start()
-            .child(self.selectable(page, sheet.into_any_element(), cx))
+            .child(self.selectable(page, sheet, cx))
             .into_any_element()
     }
 
@@ -155,12 +161,11 @@ impl Pedro {
     }
 }
 
-/// One sheet of paper, with a page on it or without, and whatever of it the
-/// reader has marked.
+/// One sheet of paper, and whatever of it the reader has marked.
 fn render_sheet(
     width: f32,
     height: f32,
-    image: Option<Arc<RenderImage>>,
+    image: Arc<RenderImage>,
     marks: Vec<Rect>,
     selection: Vec<Rect>,
 ) -> impl IntoElement {
@@ -172,7 +177,7 @@ fn render_sheet(
         .bg(palette::page())
         .shadow_lg()
         .overflow_hidden()
-        .children(image.map(|image| img(image).w(px(width)).h(px(height))))
+        .child(img(image).w(px(width)).h(px(height)))
         .children(
             marks
                 .into_iter()
@@ -201,17 +206,37 @@ fn render_over_page(rect: Rect, tint: Hsla) -> impl IntoElement {
         .bg(tint)
 }
 
+/// A page whose image has not arrived yet.
+///
+/// It takes the row's space, so the list does not move when the page lands, but
+/// draws no sheet: until a page has been rasterised its width is only the first
+/// page's width, and paper of the wrong width is paper that visibly changes
+/// shape when the real page arrives.
+fn render_pending(width: f32, height: f32) -> impl IntoElement {
+    h_flex()
+        .w(px(width))
+        .h(px(height))
+        .items_center()
+        .justify_center()
+        .child(
+            Spinner::new()
+                .with_size(px(20.))
+                .color(palette::text_faint()),
+        )
+}
+
 /// A book still being read off disk.
 ///
-/// An empty sheet rather than a spinner: the first page lands in a space of the
-/// right shape instead of pushing the layout around when it arrives.
+/// A spinner rather than a blank sheet: the sheet would have to guess a page
+/// size, and every guess is wrong for some book — a scan wider than it is tall,
+/// a plan drawn at A0. A wrongly shaped sheet moves the layout further when the
+/// first page arrives than no sheet at all does.
 fn render_opening() -> impl IntoElement {
-    h_flex()
-        .size_full()
-        .justify_center()
-        .items_start()
-        .pt(px(GAP))
-        .child(render_sheet(480., 640., None, Vec::new(), Vec::new()))
+    h_flex().size_full().items_center().justify_center().child(
+        Spinner::new()
+            .with_size(px(22.))
+            .color(palette::text_faint()),
+    )
 }
 
 fn render_failure(title: SharedString, why: SharedString) -> impl IntoElement {
