@@ -13,6 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::spread::Layout;
+
 use gpui::{RenderImage, SharedString};
 use image::{Frame, RgbaImage};
 use pedro_core::model::Highlight;
@@ -119,6 +121,10 @@ pub struct OpenDocument {
     /// The page at the top of the viewport, one-based, the way the reader
     /// counts. What the composer quotes and where the place is saved.
     pub page: u32,
+    /// Whether the pages are drawn one at a time or two facing. A property of
+    /// the book rather than of the reader — a scanned spread wants it and a
+    /// slide deck does not — so it is stored and restored per book.
+    pub layout: Layout,
     /// The pages that have been rasterised, by page number.
     pub pages: HashMap<u32, Page>,
     /// The pages pdfium is working on, so the same one is not asked for twice.
@@ -137,7 +143,7 @@ pub struct OpenDocument {
 }
 
 impl OpenDocument {
-    pub fn new(document: Document, size: PageSize, page: u32) -> Self {
+    pub fn new(document: Document, size: PageSize, page: u32, layout: Layout) -> Self {
         let page_count = document.page_count();
 
         Self {
@@ -145,6 +151,7 @@ impl OpenDocument {
             page_count,
             size,
             page: page.clamp(1, page_count.max(1)),
+            layout,
             pages: HashMap::new(),
             requested: HashSet::new(),
             generation: 0,

@@ -26,10 +26,16 @@ use pedro_pdf::Rect;
 
 use crate::app::Pedro;
 use crate::palette;
+use crate::spread::Layout;
 use crate::ui::icon;
 
-/// The space between one page and the next.
+/// The space between one row and the next.
 const GAP: f32 = 20.;
+
+/// The space between two facing pages. Narrow on purpose: a spread is one
+/// picture of one sheet of paper, and a gutter as wide as the gap between rows
+/// reads as two documents side by side.
+const SEAM: f32 = 2.;
 
 impl Pedro {
     pub(crate) fn render_reader(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -52,30 +58,62 @@ impl Pedro {
             return render_opening().into_any_element();
         };
 
-        let page_count = open.page_count as usize;
+        let page_count = open.page_count;
+        let layout = self.layout();
         let Some(scroll) = self.page_scroll().cloned() else {
             return render_empty_state().into_any_element();
         };
 
         uniform_list(
-            // Keyed by the book: gpui keeps an element's state under its id,
-            // and two books sharing one would share a scroll position that
-            // means a different place in each.
-            SharedString::from(format!("pages:{}", tab.id)),
-            page_count,
-            cx.processor(|this, range: Range<usize>, _window, cx| {
+            // Keyed by the book and by the layout: gpui keeps an element's
+            // state under its id, and a row means a different place in each of
+            // them — one id across a change of layout leaves the list scrolled
+            // to a row number that is now half a book away.
+            SharedString::from(format!("pages:{}:{}", tab.id, layout.is_spread())),
+            layout.rows(page_count),
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
                 // The list asks for exactly the rows it is about to draw, which
                 // makes this the one place that knows what to rasterise.
                 this.pages_in_view(&range, cx);
 
                 range
-                    .map(|index| this.render_page_row(index as u32 + 1, cx))
+                    .map(|row| this.render_row(row, layout, page_count, cx))
                     .collect()
             }),
         )
         .track_scroll(scroll)
         .size_full()
         .into_any_element()
+    }
+
+    /// One row of the reader: a page, or two facing pages.
+    fn render_row(
+        &self,
+        row: usize,
+        layout: Layout,
+        page_count: u32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let height = self.page_height();
+        let pages = layout.pages(row, page_count);
+
+        // The cover faces nothing, and a reader sees it as the right-hand page
+        // of the spread. Held open with a blank of the same width rather than
+        // centred, so the pages below it do not slide sideways as the reader
+        // scrolls past.
+        let leading = layout.is_spread() && pages.as_slice() == [1];
+        let width = self
+            .open_document()
+            .map_or(0., |open| open.width_of(1, height));
+
+        h_flex()
+            .h(px(height + GAP))
+            .w_full()
+            .justify_center()
+            .items_start()
+            .gap(px(SEAM))
+            .when(leading, |this| this.child(div().w(px(width))))
+            .children(pages.into_iter().map(|page| self.render_page(page, cx)))
     }
 
     /// A shelf: its name, and the books a question to it is answered from.
@@ -249,11 +287,11 @@ impl Pedro {
             }))
     }
 
-    /// One page, centred in a row of its own.
-    fn render_page_row(&self, page: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// One page, drawn with whatever the reader has marked on it.
+    fn render_page(&self, page: u32, cx: &mut Context<Self>) -> AnyElement {
         let height = self.page_height();
         let Some(open) = self.open_document() else {
-            return div().h(px(height + GAP)).into_any_element();
+            return div().h(px(height)).into_any_element();
         };
 
         // The page's own shape where it is known. Books whose pages differ in
@@ -281,13 +319,7 @@ impl Pedro {
             None => render_pending(width, height).into_any_element(),
         };
 
-        h_flex()
-            .h(px(height + GAP))
-            .w_full()
-            .justify_center()
-            .items_start()
-            .child(self.selectable(page, sheet, cx))
-            .into_any_element()
+        self.selectable(page, sheet, cx).into_any_element()
     }
 
     /// Makes a page answer a drag with a passage.

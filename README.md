@@ -43,7 +43,7 @@ and the answer arrives beside the page with sources that turn back to it.
 | Contents, Highlights, Agents and Settings panels | Done |
 | Keyboard: arrows to turn pages, ⌘± to zoom, ⌘K to search | Done |
 | Vim and Emacs key bindings | Not started |
-| Two-page spreads | Not started |
+| Two-page spreads | Done |
 | Reading a PDF out of Google Drive | Done |
 
 ## Layout
@@ -154,6 +154,7 @@ passage stays marked, and pressing a mark reopens what was asked about it.
 | | |
 | --- | --- |
 | Turn pages | `←` `→` |
+| One page or two, as the book was printed | `⌘⇧S` |
 | Zoom | `⌘-` `⌘=` `⌘0` |
 | Search the sidebar | `⌘K` |
 | Choose which CLI answers | Agents, in the sidebar under More |

@@ -227,6 +227,31 @@ carried across in one transaction. A reader's conversations are the part of that
 file that cannot be rebuilt from their PDFs, which is why that migration has a
 test of its own and was also run against a copy of a real library.
 
+### Spreads: two pages, the way the book was printed
+
+A printed spread is not "pages 1 and 2". Page 1 is a right-hand page with
+nothing facing it, and the pairs run 2–3, 4–5 from there; pairing from the front
+instead puts every spread half a book out of step with the paper it is a picture
+of. So the cover has a row to itself, held open by a blank of its own width so
+the pages below do not slide sideways as the reader scrolls past it.
+
+Which pages face each other is the only thing that knows about spreads. The
+scrolling list counts in rows, everything else counts in pages, and one row can
+now hold two of them — so the conversion lives in one place with tests, and the
+places that scroll (opening a book, turning a page, following a citation) ask it
+for a row rather than assuming the page number is one.
+
+The layout is stored per book rather than per reader, because it is a property
+of the book: a scanned spread wants it and a slide deck does not.
+
+**What this cost, and what it turned up.** The first version answered "page 1"
+for a row past the end of the book. The scrolling list measures itself with
+ranges beyond the last row, every frame — so every frame the reader was reported
+to be back at the cover, which moved the place, which saved it, which drew
+again. A flutter that settled in half a second at startup became a loop that
+never settled: 336 redraws in twelve seconds against 72 in half a second before
+it. A row past the end holds no page, and saying so is what stopped it.
+
 ## Layout
 
 ```
@@ -276,7 +301,7 @@ Each step leaves the workspace building and tested.
 9. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
    continuous scroll, selection and highlights, chat panel with streaming and
    citations, contents, settings, and the keys for turning and zooming. Vim and
-   Emacs bindings and two-page spreads are the parts of step 7 still open.
+   Emacs bindings are the part of step 7 still open.
 
 Steps 1–6 have no GPUI dependency. The workspace is covered by 173 tests, all of
 which run without an agent CLI, a network, or a window.

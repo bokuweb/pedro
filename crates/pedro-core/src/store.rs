@@ -440,12 +440,14 @@ impl Store {
             "UPDATE books SET last_read_page = ?1, last_read_highlight_id = ?2, \
              last_read_outline_open = COALESCE(?3, last_read_outline_open), \
              last_read_chat_panel_open = COALESCE(?4, last_read_chat_panel_open), \
-             updated_at = ?5 WHERE id = ?6",
+             last_read_spread = COALESCE(?5, last_read_spread), \
+             updated_at = ?6 WHERE id = ?7",
             params![
                 state.page,
                 state.highlight_id,
                 state.outline_open,
                 state.chat_panel_open,
+                state.spread,
                 now(),
                 book_id,
             ],
@@ -740,7 +742,8 @@ fn extract(path: &Path) -> Result<Extracted, StoreError> {
 
 const BOOK_COLUMNS: &str = "SELECT id, file_name, file_hash, page_count, outline, folder_id, \
                             created_at, updated_at, last_read_page, last_read_highlight_id, \
-                            last_read_outline_open, last_read_chat_panel_open FROM books";
+                            last_read_outline_open, last_read_chat_panel_open, \
+                            last_read_spread FROM books";
 
 fn read_book(row: &Row<'_>) -> rusqlite::Result<Book> {
     let page: Option<u32> = row.get("last_read_page")?;
@@ -759,6 +762,7 @@ fn read_book(row: &Row<'_>) -> rusqlite::Result<Book> {
             highlight_id: row.get("last_read_highlight_id").unwrap_or(None),
             outline_open: row.get("last_read_outline_open").unwrap_or(None),
             chat_panel_open: row.get("last_read_chat_panel_open").unwrap_or(None),
+            spread: row.get("last_read_spread").unwrap_or(None),
         }),
     })
 }
@@ -904,7 +908,8 @@ CREATE TABLE books (
     last_read_page INTEGER,
     last_read_highlight_id TEXT,
     last_read_outline_open INTEGER,
-    last_read_chat_panel_open INTEGER
+    last_read_chat_panel_open INTEGER,
+    last_read_spread INTEGER
 );
 
 CREATE TABLE highlights (
@@ -1020,5 +1025,27 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         connection.pragma_update(None, "user_version", 4)?;
     }
 
+    if version < 5 {
+        // `SCHEMA` writes this column, so a library made after it was added
+        // already has it and a library made before it does not — and both
+        // arrive here. Adding it twice is the expected case, not a fault.
+        match connection.execute_batch("ALTER TABLE books ADD COLUMN last_read_spread INTEGER") {
+            Ok(()) => {}
+            Err(err) if already_there(&err) => {}
+            Err(err) => return Err(err.into()),
+        }
+
+        connection.pragma_update(None, "user_version", 5)?;
+    }
+
     Ok(())
+}
+
+/// Whether a failed `ALTER TABLE ADD COLUMN` failed because the column is
+/// already there.
+///
+/// SQLite says so in the message and nowhere else: the error code is the same
+/// one it uses for every statement it could not prepare.
+fn already_there(err: &rusqlite::Error) -> bool {
+    err.to_string().contains("duplicate column name")
 }
