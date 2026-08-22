@@ -1,5 +1,7 @@
 # pedro
 
+[![CI](https://github.com/bokuweb/pedro/actions/workflows/ci.yml/badge.svg)](https://github.com/bokuweb/pedro/actions/workflows/ci.yml)
+
 A native reader for technical documents that talks to the coding agent CLIs you
 already have installed.
 
@@ -89,6 +91,22 @@ chatbook's real thinking is — be covered by tests that run without a window.
   `PEDRO_GOOGLE_CLIENT_ID` and `PEDRO_GOOGLE_CLIENT_SECRET`. Everything else
   works without it; this is what lets a book come from Drive rather than from
   the disk. See [`docs/GOOGLE_DRIVE.md`](docs/GOOGLE_DRIVE.md).
+
+## Checks
+
+What CI runs, and what to run before pushing:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features
+cargo test --workspace --all-features
+```
+
+CI builds with `RUSTFLAGS=-D warnings`, so anything clippy has to say there is
+a failure. It runs on macOS, because `pedro-app` compiles Metal shaders and
+builds nowhere else; it fetches pdfium first, since the `pedro-pdf` tests open
+real documents. The embedding model is not fetched — nothing in the tests needs
+it.
 
 ## Using it
 
