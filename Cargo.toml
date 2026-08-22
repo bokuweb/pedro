@@ -3,6 +3,7 @@ members = [
     "crates/pedro-agent",
     "crates/pedro-app",
     "crates/pedro-core",
+    "crates/pedro-drive",
     "crates/pedro-pdf",
     "crates/pedro-search",
 ]
@@ -17,6 +18,7 @@ repository = "https://github.com/bokuweb/pedro"
 [workspace.dependencies]
 pedro-agent = { path = "crates/pedro-agent" }
 pedro-core = { path = "crates/pedro-core" }
+pedro-drive = { path = "crates/pedro-drive" }
 pedro-pdf = { path = "crates/pedro-pdf" }
 pedro-search = { path = "crates/pedro-search" }
 

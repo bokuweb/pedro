@@ -138,6 +138,16 @@ pub struct Pedro {
     pub(crate) notice: Option<SharedString>,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
+    /// Where a Google Drive link is pasted, and whether that row is showing.
+    ///
+    /// Hidden until it is asked for: most books come off the disk, and a field
+    /// for the ones that do not should not cost a row of the panel to every
+    /// reader who never uses it.
+    pub(crate) drive: Entity<InputState>,
+    pub(crate) drive_open: bool,
+    /// Whether a fetch is in flight. One at a time: the first thing a fetch
+    /// may do is open a browser, and two of those at once is not a sign-in.
+    pub(crate) drive_busy: bool,
 }
 
 impl Pedro {
@@ -163,6 +173,16 @@ impl Pedro {
             // tells it apart from the shift-enter that only breaks the line.
             if matches!(event, InputEvent::PressEnter { secondary: true }) {
                 this.ask(window, cx);
+            }
+        })
+        .detach();
+
+        let drive = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Paste a Google Drive link and press ⏎")
+        });
+        cx.subscribe_in(&drive, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.add_from_drive(window, cx);
             }
         })
         .detach();
@@ -199,6 +219,9 @@ impl Pedro {
             turn_to_when_open: None,
             notice: None,
             window_drag_armed: false,
+            drive,
+            drive_open: false,
+            drive_busy: false,
         }
     }
 
@@ -374,6 +397,92 @@ impl Pedro {
 
             this.update(cx, |this, cx| this.documents_added(added, cx))
                 .ok();
+        })
+        .detach();
+    }
+
+    /// Shows or hides the row a Google Drive link is pasted into.
+    pub(crate) fn toggle_drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drive_open = !self.drive_open;
+
+        if self.drive_open {
+            self.drive.update(cx, |drive, cx| drive.focus(window, cx));
+        }
+
+        cx.notify();
+    }
+
+    /// Fetches whatever the Drive field names, and adds it to the library.
+    ///
+    /// The whole of it — the sign-in, the download, reading the document —
+    /// happens on a background thread, because the first fetch of a session
+    /// waits for a browser window the reader has to come back from.
+    pub(crate) fn add_from_drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drive_busy {
+            return;
+        }
+
+        let link = self.drive.read(cx).value().trim().to_owned();
+        if link.is_empty() {
+            return;
+        }
+
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        // Nothing can be fetched without a client id, and saying so before the
+        // browser opens is the only place the reader can act on it.
+        let Some(credentials) = pedro_drive::Credentials::from_env() else {
+            self.notice = Some(pedro_drive::DriveError::NotConfigured.to_string().into());
+            cx.notify();
+            return;
+        };
+
+        self.drive_busy = true;
+        // Whether this needs a browser is a question for the keychain, and the
+        // keychain is not something to ask on the thread drawing frames — it
+        // can put a dialog of its own up first. One message covers both.
+        self.notice = Some("Fetching from Google Drive… (a browser may open to sign in)".into());
+        self.drive
+            .update(cx, |drive, cx| drive.set_value("", window, cx));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let added = cx
+                .background_executor()
+                .spawn(async move {
+                    let directory = pedro_drive::scratch();
+                    let mut failures = Vec::new();
+
+                    match pedro_drive::fetch(&credentials, &link, &directory) {
+                        Ok(fetched) => {
+                            let mut store = store.lock();
+                            if let Err(err) = store.add_document(&fetched.path) {
+                                failures.push(format!("{}: {err}", fetched.name));
+                            }
+                        }
+                        Err(err) => failures.push(err.to_string()),
+                    }
+
+                    // The library has taken its own copy under a content hash
+                    // by now, so what was fetched is nothing but a temporary
+                    // file in the way.
+                    let _ = std::fs::remove_dir_all(&directory);
+
+                    store
+                        .lock()
+                        .books()
+                        .map_err(|err| err.to_string())
+                        .map(|books| (books, failures))
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.drive_busy = false;
+                this.documents_added(added, cx);
+            })
+            .ok();
         })
         .detach();
     }

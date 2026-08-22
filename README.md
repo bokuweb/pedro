@@ -42,7 +42,7 @@ and the answer arrives beside the page with sources that turn back to it.
 | Keyboard: arrows to turn pages, ⌘± to zoom, ⌘K to search | Done |
 | Vim and Emacs key bindings | Not started |
 | Two-page spreads | Not started |
-| Reading a PDF out of Google Drive | Not started |
+| Reading a PDF out of Google Drive | Done |
 
 ## Layout
 
@@ -51,6 +51,7 @@ crates/
   pedro-agent   Finding the installed agent CLIs, and running one.
   pedro-pdf     Pages, text with per-character boxes, outlines. pdfium.
   pedro-core    The domain: library, excerpts, prompts, citations, chat.
+  pedro-drive   Fetching a PDF out of Google Drive. The only remote piece.
   pedro-app     The GPUI application.
 ```
 
@@ -84,13 +85,19 @@ chatbook's real thinking is — be covered by tests that run without a window.
 
 - At least one agent CLI installed and authenticated (`claude` or `codex`).
 
+- **Optional, for Google Drive**: an OAuth client of your own, in
+  `PEDRO_GOOGLE_CLIENT_ID` and `PEDRO_GOOGLE_CLIENT_SECRET`. Everything else
+  works without it; this is what lets a book come from Drive rather than from
+  the disk. See [`docs/GOOGLE_DRIVE.md`](docs/GOOGLE_DRIVE.md).
+
 ## Using it
 
 ```bash
 cargo run -p pedro-app
 ```
 
-Add a PDF with the plus in the sidebar header. Open it, drag across a passage,
+Add a PDF with the plus in the sidebar header, or paste a Google Drive link
+into the field the button beside it opens. Open it, drag across a passage,
 type a question, and press the arrow. The answer streams into the panel beside
 the page; the sources under it turn the book to where they came from. The
 passage stays marked, and pressing a mark reopens what was asked about it.
