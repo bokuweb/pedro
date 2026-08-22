@@ -36,6 +36,9 @@ const LIGHTS: f32 = 84.;
 /// Names the row a remove button hides inside until the row is hovered.
 const GROUP: &str = "row";
 
+/// The same, for the header of a shelf: the delete affordance hides in it.
+const HEADER: &str = "section-header";
+
 impl Pedro {
     pub(crate) fn render_sidebar(
         &self,
@@ -63,6 +66,7 @@ impl Pedro {
                 .children(self.render_drive_field())
                 .child(self.render_search())
                 .children(self.render_notice())
+                .children(self.render_new_shelf_button(cx))
                 .child(self.render_sections(cx))
                 .child(self.render_agent_footer()),
         )
@@ -91,7 +95,6 @@ impl Pedro {
             .items_center()
             .child(self.render_add_button(cx))
             .child(self.render_drive_button(cx))
-            .children(self.render_new_shelf_button(cx))
             .child(
                 div()
                     .id("panel-hint")
@@ -265,27 +268,46 @@ impl Pedro {
             }))
     }
 
-    /// Makes a shelf, on the panel where shelves are shown.
+    /// Makes a shelf, directly on top of the shelves it will join.
     ///
-    /// Beside the two ways a book gets in rather than under a menu: a shelf is
-    /// the other thing a reader makes in this panel, and they belong together.
+    /// This was an icon in the window row, four rows and a search box above the
+    /// list it changes, beside the buttons that add a document. But a reader
+    /// makes a shelf while looking at the books they mean to group, and the row
+    /// they are looking at is where the affordance has to be. It is a labelled
+    /// row rather than an icon for the same reason the navigation is: a shelf
+    /// and a folder are not the same thing, and only the word says which.
+    ///
+    /// A search replaces the list with passages, which are not shelved, so it
+    /// takes this with it.
     fn render_new_shelf_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if self.active_rail != RailItem::Library {
+        if self.active_rail != RailItem::Library || !self.search_query(cx).is_empty() {
             return None;
         }
 
         Some(
-            div()
+            h_flex()
                 .id("panel-new-shelf")
-                .size(px(24.))
-                .rounded(px(7.))
-                .flex()
+                .h(px(30.))
+                .mx(px(INSET))
+                .px(px(8.))
+                .gap(px(8.))
                 .items_center()
-                .justify_center()
+                .rounded(px(8.))
+                .cursor_pointer()
                 .hover(|this| this.bg(palette::row_hover()))
-                .child(icon(IconName::FolderOpen, px(15.), palette::text_muted()))
+                .child(icon(IconName::FolderOpen, px(14.), palette::text_muted()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(palette::text_muted())
+                        .child("New shelf"),
+                )
                 .tooltip(move |window, cx| {
-                    Tooltip::new("New shelf — ask a group of books at once").build(window, cx)
+                    Tooltip::new("A shelf is asked as one — every book on it at once")
+                        .build(window, cx)
                 })
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -416,14 +438,26 @@ impl Pedro {
         let shelf = section.shelf.clone();
         let open = shelf.clone();
         let dropped = shelf.clone();
+        // A shelf being asked whether it should go has its own question drawn
+        // over this, so the count stands down for as long as that is up.
+        let asked = shelf
+            .as_ref()
+            .map(|shelf| SharedString::from(format!("shelf:{shelf}")))
+            .is_some_and(|id| self.is_confirming(&id));
         let count = shelf
             .as_ref()
+            .filter(|_| !asked)
             .map(|_| SharedString::from(section.entries.len().to_string()));
         let tab_id = shelf.as_ref().map(|id| format!("shelf:{id}"));
         let active = tab_id.is_some_and(|id| self.active_tab().is_some_and(|tab| tab.id == id));
 
         h_flex()
             .id(("section", index))
+            .group(HEADER)
+            // The delete affordance is laid over the count rather than put
+            // beside it: a name that shortens the moment the pointer crosses
+            // the header is a name that moves while it is being read.
+            .relative()
             .h(px(32.))
             .mx(px(INSET))
             .px(px(8.))
@@ -444,21 +478,27 @@ impl Pedro {
                     this.shelve_book(&book.0, Some(shelf.as_ref()), cx);
                 }
             }))
-            .on_click(cx.listener(move |this, _, window, cx| match &open {
-                // Clicking a shelf opens it; clicking a grouping folds it.
-                Some(shelf) => {
-                    let name = shelf.to_string();
-                    let title = this
-                        .library
-                        .shelves()
-                        .iter()
-                        .find(|folder| folder.id == name)
-                        .map(|folder| folder.name.clone())
-                        .unwrap_or_default();
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // Pressing the header rather than its delete button is an
+                // answer to the question that button asked.
+                this.cancel_confirmation(cx);
 
-                    this.open_shelf(&name, &title, window, cx);
+                match &open {
+                    // Clicking a shelf opens it; clicking a grouping folds it.
+                    Some(shelf) => {
+                        let name = shelf.to_string();
+                        let title = this
+                            .library
+                            .shelves()
+                            .iter()
+                            .find(|folder| folder.id == name)
+                            .map(|folder| folder.name.clone())
+                            .unwrap_or_default();
+
+                        this.open_shelf(&name, &title, window, cx);
+                    }
+                    None => this.toggle_section(index, cx),
                 }
-                None => this.toggle_section(index, cx),
             }))
             .children(shelf.is_some().then(|| {
                 icon(
@@ -488,6 +528,9 @@ impl Pedro {
                 div()
                     .text_size(px(11.))
                     .text_color(palette::text_faint())
+                    // The delete affordance is drawn over this, so the count
+                    // gets out of the way rather than showing through it.
+                    .group_hover(HEADER, |this| this.invisible())
                     .child(count)
             }))
             .child(
@@ -502,6 +545,61 @@ impl Pedro {
                         this.toggle_section(index, cx);
                     })),
             )
+            .children(shelf.map(|shelf| self.render_shelf_delete_button(&shelf, cx)))
+    }
+
+    /// Throws a shelf away from the list it is in, asking first.
+    ///
+    /// The shelf view has this too, but reaching it means opening the shelf to
+    /// delete it — which is a long way round for a shelf made by accident, and
+    /// no way at all for one the reader can see is empty. The books stay
+    /// either way: a shelf is a grouping, not a place the file lives.
+    fn render_shelf_delete_button(
+        &self,
+        shelf: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        // The same id the shelf view confirms under, so a shelf cannot be
+        // half-asked about in two places at once.
+        let asked = SharedString::from(format!("shelf:{shelf}"));
+        let confirming = self.is_confirming(&asked);
+        let shelf_id = shelf.to_string();
+
+        div()
+            .id(SharedString::from(format!("delete-shelf:{shelf}")))
+            .absolute()
+            .top(px(6.))
+            .right(px(30.))
+            .px(px(7.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .when(!confirming, |this| {
+                this.invisible()
+                    .group_hover(HEADER, |this| this.visible())
+                    .bg(palette::surface())
+            })
+            .when(confirming, |this| this.bg(palette::danger().opacity(0.24)))
+            .hover(|this| this.bg(palette::danger().opacity(0.36)))
+            .text_size(px(10.))
+            .text_color(if confirming {
+                palette::danger()
+            } else {
+                palette::text_muted()
+            })
+            .child(if confirming {
+                "Delete? The books stay."
+            } else {
+                "Delete"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                match this.is_confirming(&asked) {
+                    true => this.delete_shelf(&shelf_id, cx),
+                    false => this.confirm(asked.clone(), cx),
+                }
+            }))
     }
 
     fn render_entry(&self, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
