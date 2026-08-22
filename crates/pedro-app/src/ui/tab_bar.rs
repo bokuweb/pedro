@@ -23,6 +23,10 @@ const HEIGHT: f32 = 44.;
 /// The room the macOS traffic lights need at the left edge of the window.
 const LIGHTS: f32 = 84.;
 
+/// How wide a tab title is allowed to grow. Book filenames run long, and
+/// without a ceiling one of them pushes every other tab out of the row.
+const LABEL_MAX: f32 = 180.;
+
 impl Pedro {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tabs: Vec<_> = self
@@ -146,6 +150,9 @@ impl Pedro {
             ))
             .child(
                 div()
+                    .max_w(px(LABEL_MAX))
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(14.))
                     .text_color(if active {
                         palette::text()
