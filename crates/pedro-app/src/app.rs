@@ -28,6 +28,7 @@ use crate::document::{OpenDocument, Page, Spotlight, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::panes::Pane;
+use crate::spread::Layout;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, ShelfMenu, Shown};
 use gpui::UniformListScrollHandle;
 use pedro_agent::AgentError;
@@ -45,7 +46,8 @@ actions!(
         PreviousTab,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        ToggleSpread
     ]
 );
 
@@ -935,6 +937,9 @@ impl Pedro {
 
         let store = store.clone();
         let page = book.reading.as_ref().map_or(1, |reading| reading.page);
+        // How this book was last read, which is a property of the book: a
+        // scanned spread wants facing pages and a slide deck does not.
+        let layout = Layout::from_stored(book.reading.as_ref().and_then(|reading| reading.spread));
         let tab_id: SharedString = format!("book:{book_id}").into();
 
         cx.spawn(async move |this, cx| {
@@ -973,8 +978,10 @@ impl Pedro {
                 })
                 .await;
 
-            this.update(cx, |this, cx| this.book_loaded(&tab_id, opened, page, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.book_loaded(&tab_id, opened, page, layout, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -984,6 +991,7 @@ impl Pedro {
         tab_id: &str,
         opened: Result<(Document, PageSize, Vec<Highlight>), String>,
         page: u32,
+        layout: Layout,
         cx: &mut Context<Self>,
     ) {
         // The reader may have closed the tab while the book was being read.
@@ -994,7 +1002,7 @@ impl Pedro {
         match opened {
             Ok((document, size, highlights)) => {
                 tab.error = None;
-                let mut open = OpenDocument::new(document, size, page);
+                let mut open = OpenDocument::new(document, size, page, layout);
                 open.highlights = highlights;
                 tab.document = Some(open);
 
@@ -1011,9 +1019,10 @@ impl Pedro {
                 }
 
                 // The list holds the position now, so continuing where the
-                // reader left off is a scroll rather than a page number.
+                // reader left off is a scroll — to the row the page is in,
+                // which is not the page number once two share a row.
                 tab.scroll
-                    .scroll_to_item(page as usize - 1, ScrollStrategy::Top);
+                    .scroll_to_item(layout.row(page), ScrollStrategy::Top);
             }
             Err(why) => {
                 tracing::error!(why, tab_id, "could not open the book");
@@ -1038,14 +1047,29 @@ impl Pedro {
             return;
         };
 
-        let top = range.start as u32 + 1;
+        // The list counts in rows and everything else counts in pages, and one
+        // row can hold two of them.
+        let layout = open.layout;
+        // The list measures itself with ranges past the last row. Those hold no
+        // page, and the reader has not moved to one.
+        let Some(top) = layout.first_page(range.start, open.page_count) else {
+            return;
+        };
         let moved = open.page != top;
         open.page = top;
 
-        // One page beyond the range in each direction, so scrolling by a page
+        // One row beyond the range in each direction, so scrolling by a row
         // never waits for pdfium.
-        let first = top.saturating_sub(1).max(1);
-        let last = (range.end as u32 + 1).min(open.page_count);
+        let first = layout
+            .first_page(range.start.saturating_sub(1), open.page_count)
+            .unwrap_or(top)
+            .max(1);
+        let last = layout
+            .pages(range.end, open.page_count)
+            .last()
+            .copied()
+            .unwrap_or(open.page_count)
+            .min(open.page_count);
 
         let wanted: Vec<u32> = (first..=last).filter(|page| open.wants(*page)).collect();
         for page in &wanted {
@@ -1312,10 +1336,12 @@ impl Pedro {
             return;
         };
 
+        let layout = open.layout;
         if let Some(page) = open.turn(by) {
-            // The list is what holds the position, so a page turn is a scroll.
+            // The list is what holds the position, so a page turn is a scroll —
+            // to the row the page is in, which is not its number in a spread.
             if let Some(scroll) = self.page_scroll() {
-                scroll.scroll_to_item(page as usize - 1, ScrollStrategy::Top);
+                scroll.scroll_to_item(layout.row(page), ScrollStrategy::Top);
             }
             cx.notify();
         }
@@ -1335,7 +1361,8 @@ impl Pedro {
         let Some(book_id) = tab.id.strip_prefix("book:").map(str::to_owned) else {
             return;
         };
-        let Some(page) = tab.document.as_ref().map(|open| open.page) else {
+        let Some((page, layout)) = tab.document.as_ref().map(|open| (open.page, open.layout))
+        else {
             return;
         };
 
@@ -1349,6 +1376,11 @@ impl Pedro {
                     // them (see `Store::save_reading_state`).
                     outline_open: None,
                     chat_panel_open: None,
+                    // Said every time rather than only when it changes: it is
+                    // cheap, and a layout that is only written by the act of
+                    // changing it is a layout that never reaches a book the
+                    // reader turned pages in and then closed.
+                    spread: Some(layout.is_spread()),
                 };
 
                 if let Err(err) = store.lock().save_reading_state(&book_id, &state) {
@@ -1997,6 +2029,32 @@ impl Pedro {
     }
 
     /// How tall a page is drawn right now.
+    /// How the pages of the open book are laid out.
+    pub(crate) fn layout(&self) -> Layout {
+        self.open_document()
+            .map(|open| open.layout)
+            .unwrap_or_default()
+    }
+
+    /// Shows the pages one at a time or two, and remembers which per book.
+    fn toggle_spread(&mut self, _: &ToggleSpread, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.document_mut() else {
+            return;
+        };
+
+        open.layout = open.layout.toggled();
+        let (page, layout) = (open.page, open.layout);
+
+        // The list is keyed by the layout, so the new one starts unscrolled;
+        // put it back on the page the reader was reading.
+        if let Some(scroll) = self.page_scroll() {
+            scroll.scroll_to_item(layout.row(page), ScrollStrategy::Top);
+        }
+
+        self.save_reading_position(cx);
+        cx.notify();
+    }
+
     pub(crate) fn page_height(&self) -> f32 {
         PAGE_HEIGHT * self.zoom
     }
@@ -2227,6 +2285,7 @@ impl Render for Pedro {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
+            .on_action(cx.listener(Self::toggle_spread))
             .size_full()
             .text_color(cx.theme().foreground)
             .text_size(px(15.))

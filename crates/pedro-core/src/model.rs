@@ -44,6 +44,10 @@ pub struct ReadingState {
     pub highlight_id: Option<String>,
     pub outline_open: Option<bool>,
     pub chat_panel_open: Option<bool>,
+    /// Whether the pages were shown two at a time, the way the book was
+    /// printed. Per book because it is a property of the book rather than of
+    /// the reader: a scanned spread wants it and a slide deck does not.
+    pub spread: Option<bool>,
 }
 
 /// A passage the reader marked.

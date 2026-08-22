@@ -90,6 +90,7 @@ fn re_adding_the_same_book_keeps_its_highlights_and_its_place() {
                 highlight_id: None,
                 outline_open: Some(true),
                 chat_panel_open: None,
+                spread: None,
             },
         )
         .expect("a stored book");
@@ -184,6 +185,7 @@ fn a_place_is_saved_and_read_back() {
                 highlight_id: Some(highlight.id.clone()),
                 outline_open: Some(false),
                 chat_panel_open: Some(true),
+                spread: None,
             },
         )
         .expect("a stored book");
@@ -215,6 +217,7 @@ fn saving_a_page_leaves_panels_nobody_mentioned_alone() {
         highlight_id: None,
         outline_open: Some(true),
         chat_panel_open: Some(true),
+        spread: None,
     };
     store
         .save_reading_state(&book.id, &opened)
@@ -228,6 +231,7 @@ fn saving_a_page_leaves_panels_nobody_mentioned_alone() {
                 highlight_id: None,
                 outline_open: None,
                 chat_panel_open: None,
+                spread: None,
             },
         )
         .expect("a stored book");

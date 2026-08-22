@@ -7,6 +7,7 @@ mod document;
 mod library;
 mod palette;
 mod panes;
+mod spread;
 mod state;
 mod ui;
 
@@ -20,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::{
     FocusSearch, NextPage, NextTab, Pedro, PreviousPage, PreviousTab, ToggleChat, ToggleSidebar,
-    ZoomIn, ZoomOut, ZoomReset,
+    ToggleSpread, ZoomIn, ZoomOut, ZoomReset,
 };
 
 fn main() {
@@ -46,6 +47,8 @@ fn main() {
                 KeyBinding::new("cmd-+", ZoomIn, None),
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("cmd-0", ZoomReset, None),
+                // One sheet or two, the way the book was printed.
+                KeyBinding::new("cmd-shift-s", ToggleSpread, None),
                 // The keys every tabbed application uses for this.
                 // What every editor with two side panels uses.
                 KeyBinding::new("cmd-b", ToggleSidebar, None),

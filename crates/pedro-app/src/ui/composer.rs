@@ -281,6 +281,20 @@ impl Pedro {
                             .text_color(palette::text_faint())
                             .child(format!("{} pages", open.page_count))
                     }))
+                    // Only when the pages are paired: one at a time is what a
+                    // reader who has not asked for anything expects to see.
+                    .children(self.layout().is_spread().then(|| {
+                        h_flex()
+                            .gap(px(5.))
+                            .items_center()
+                            .child(icon(IconName::BookOpen, px(12.), palette::text_faint()))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(palette::text_faint())
+                                    .child("spread"),
+                            )
+                    }))
                     // Only when it is not the size a page is normally drawn at:
                     // a reader who has not zoomed does not need telling.
                     .children(zoomed.map(|zoom| {
