@@ -109,6 +109,31 @@ impl Document {
         self.count()
     }
 
+    /// Every page's size, in one pass.
+    ///
+    /// Asked of the page table rather than of the pages: `FPDF_GetPageSizeByIndexF`
+    /// reads the size out of the document's own index without loading a page,
+    /// which is the difference between opening a five-hundred-page book and
+    /// opening five hundred pages of it.
+    ///
+    /// Wanted in one pass because a reader that lays a book out has to know the
+    /// shape of every page before it draws any of them — otherwise each page
+    /// arriving at its true shape moves the ones around it.
+    pub fn page_sizes(&self) -> Result<Vec<PageSize>, PdfError> {
+        let _guard = in_use();
+        Ok(self
+            .inner()
+            .pages()
+            .page_sizes()
+            .map_err(PdfError::from)?
+            .into_iter()
+            .map(|rect| PageSize {
+                width: rect.width().value,
+                height: rect.height().value,
+            })
+            .collect())
+    }
+
     pub fn page_size(&self, index: u32) -> Result<PageSize, PdfError> {
         let _guard = in_use();
         let page = self.page(index)?;

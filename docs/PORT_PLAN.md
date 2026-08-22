@@ -244,6 +244,21 @@ for a row rather than assuming the page number is one.
 The layout is stored per book rather than per reader, because it is a property
 of the book: a scanned spread wants it and a slide deck does not.
 
+**A book is not all one shape.** A page turned sideways among upright ones is a
+fold-out: it *is* the spread, and pairing it with the page after it gives the
+reader half a plan beside an unrelated page of text. So a sideways page takes a
+row to itself and the whole width, and so does the page it would have faced —
+which keeps every later pair on the same side of the book as before.
+
+**What a page is measured against is the page itself, from the moment the book
+opens.** The first version measured the first page and used that until each page
+arrived at its true shape, which moved the row while the reader was in it. Every
+size is now read in one pass at open: asking the page table costs about seven
+milliseconds for a five-hundred-page book, where asking the pages themselves
+costs seven milliseconds *each*. The window is divided into columns before
+anything is drawn, and a page that does not fill its column is centred in it, so
+nothing moves as the pixels arrive.
+
 **Two pages need twice the width, and the window does not grow to meet them.**
 A spread drawn at the size a single page had runs off the right edge; shrunk to
 fit, it gets smaller the narrower the window is, which is the wrong thing to
