@@ -55,11 +55,21 @@ actions!(
 const ASK_A_DOCUMENT: &str = "Ask about this document… (⏎ to send, ⇧⏎ for a line)";
 const ASK_A_SHELF: &str = "Ask across these books… (⏎ to send, ⇧⏎ for a line)";
 
+/// The space between one row of pages and the next, and the air a spread is
+/// given at the window's edges — which is the same number because it is the
+/// same rhythm.
+pub(crate) const GAP: f32 = 20.;
+
 /// The space between two facing pages. Narrow on purpose: a spread is one
 /// picture of one sheet of paper, and a gutter as wide as the gap between rows
 /// reads as two documents side by side. Here rather than in the reader because
 /// fitting a spread to the window has to allow for it too.
 pub(crate) const SEAM: f32 = 2.;
+
+/// The narrowest a page may be drawn before two of them stop being worth
+/// showing side by side. Below this a spread is two columns of margin with a
+/// stripe of text down each, and one page is the better answer.
+const NARROWEST_PAGE: f32 = 320.;
 
 /// How tall a page is drawn at 100%, in logical pixels.
 ///
@@ -976,6 +986,11 @@ impl Pedro {
                     // Every page is laid out against the first one's size, so
                     // it is read here rather than on the UI thread later.
                     let size = document.page_size(0).map_err(|err| err.to_string())?;
+                    // Every page's shape, in one pass. The reader has to know
+                    // them all before it draws any, and asking the page table
+                    // costs about seven milliseconds for five hundred pages
+                    // where asking the pages themselves costs four seconds.
+                    let sizes = document.page_sizes().map_err(|err| err.to_string())?;
 
                     // A book stored with no table of contents may simply have
                     // been read by a pedro that could not see the one it has.
@@ -988,7 +1003,7 @@ impl Pedro {
                         }
                     }
 
-                    Ok::<_, String>((document, size, highlights))
+                    Ok::<_, String>((document, size, sizes, highlights))
                 })
                 .await;
 
@@ -1003,7 +1018,7 @@ impl Pedro {
     fn book_loaded(
         &mut self,
         tab_id: &str,
-        opened: Result<(Document, PageSize, Vec<Highlight>), String>,
+        opened: Result<(Document, PageSize, Vec<PageSize>, Vec<Highlight>), String>,
         page: u32,
         layout: Layout,
         cx: &mut Context<Self>,
@@ -1014,10 +1029,19 @@ impl Pedro {
         };
 
         match opened {
-            Ok((document, size, highlights)) => {
+            Ok((document, size, sizes, highlights)) => {
                 tab.error = None;
-                let mut open = OpenDocument::new(document, size, page, layout);
+                let mut open = OpenDocument::new(document, size, sizes, page, layout);
                 open.highlights = highlights;
+                // How it will actually be drawn, which is what the row the list
+                // is sent to has to be counted in.
+                let layout = self.laid_out(open.layout);
+                open.lay_out(layout);
+                let row = open.rows.row_of(page);
+
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                    return;
+                };
                 tab.document = Some(open);
 
                 // Where it was asked to go, or where the reader left off.
@@ -1035,8 +1059,7 @@ impl Pedro {
                 // The list holds the position now, so continuing where the
                 // reader left off is a scroll — to the row the page is in,
                 // which is not the page number once two share a row.
-                tab.scroll
-                    .scroll_to_item(layout.row(page), ScrollStrategy::Top);
+                tab.scroll.scroll_to_item(row, ScrollStrategy::Top);
             }
             Err(why) => {
                 tracing::error!(why, tab_id, "could not open the book");
@@ -1054,19 +1077,24 @@ impl Pedro {
     /// page the reader is on, which is what a question quotes and what the
     /// stored place points at.
     pub(crate) fn pages_in_view(&mut self, range: &Range<usize>, cx: &mut Context<Self>) {
+        // The layout there is room for, not the one the reader asked for, and
+        // worked out before the borrow below. These are the same until a window
+        // is too narrow for two pages; while they differ, reading rows with the
+        // wrong one asks pdfium for pages that are not on screen and never asks
+        // for the ones that are, which looks like a book that will not load.
+        let layout = self.layout();
+
         let Some(tab) = self.active_tab else {
             return;
         };
         let Some(open) = self.tabs.get_mut(tab).and_then(|tab| tab.document.as_mut()) else {
             return;
         };
+        open.lay_out(layout);
 
-        // The list counts in rows and everything else counts in pages, and one
-        // row can hold two of them.
-        let layout = open.layout;
         // The list measures itself with ranges past the last row. Those hold no
         // page, and the reader has not moved to one.
-        let Some(top) = layout.first_page(range.start, open.page_count) else {
+        let Some(top) = open.rows.first_page(range.start) else {
             return;
         };
         let moved = open.page != top;
@@ -1074,15 +1102,17 @@ impl Pedro {
 
         // One row beyond the range in each direction, so scrolling by a row
         // never waits for pdfium.
-        let first = layout
-            .first_page(range.start.saturating_sub(1), open.page_count)
+        let first = open
+            .rows
+            .first_page(range.start.saturating_sub(1))
             .unwrap_or(top)
             .max(1);
-        let last = layout
-            .pages(range.end, open.page_count)
+        let last = open
+            .rows
+            .pages(range.end)
             .last()
             .copied()
-            .unwrap_or(open.page_count)
+            .unwrap_or(top)
             .min(open.page_count);
 
         let wanted: Vec<u32> = (first..=last).filter(|page| open.wants(*page)).collect();
@@ -1172,10 +1202,14 @@ impl Pedro {
         }
 
         match rendered {
-            Ok((image, text, size)) => {
+            Ok((image, text, _size)) => {
                 open.requested.remove(&page);
                 if let Some(image) = as_render_image(image) {
-                    open.store(page, Page { image, size, text });
+                    // The size it came back at is not kept: every page's size
+                    // was read from the page table when the book was opened,
+                    // and a layout that waited for the pixels to learn a page's
+                    // shape is a layout that moves while it is being read.
+                    open.store(page, Page { image, text });
                 }
             }
             Err(why) => {
@@ -1342,6 +1376,7 @@ impl Pedro {
 
     /// Moves `by` pages and draws what that lands on.
     pub(crate) fn turn_page(&mut self, by: i64, cx: &mut Context<Self>) {
+        let layout = self.layout();
         let Some(open) = self
             .active_tab
             .and_then(|index| self.tabs.get_mut(index))
@@ -1349,13 +1384,14 @@ impl Pedro {
         else {
             return;
         };
+        open.lay_out(layout);
 
-        let layout = open.layout;
-        if let Some(page) = open.turn(by) {
+        let turned = open.turn(by).map(|page| open.rows.row_of(page));
+        if let Some(row) = turned {
             // The list is what holds the position, so a page turn is a scroll —
             // to the row the page is in, which is not its number in a spread.
             if let Some(scroll) = self.page_scroll() {
-                scroll.scroll_to_item(layout.row(page), ScrollStrategy::Top);
+                scroll.scroll_to_item(row, ScrollStrategy::Top);
             }
             cx.notify();
         }
@@ -1375,6 +1411,8 @@ impl Pedro {
         let Some(book_id) = tab.id.strip_prefix("book:").map(str::to_owned) else {
             return;
         };
+        // The chosen layout, not the one there was room for: a reader who
+        // narrows the window has not asked to stop reading spreads.
         let Some((page, layout)) = tab.document.as_ref().map(|open| (open.page, open.layout))
         else {
             return;
@@ -2072,22 +2110,53 @@ impl Pedro {
     /// for two pages shows one, and shows two again when there is room —
     /// zooming out is another way to make room.
     pub(crate) fn layout(&self) -> Layout {
-        match self.chosen_layout().is_spread() && self.spread_fits() {
+        self.laid_out(self.chosen_layout())
+    }
+
+    /// How a book with this choice is drawn. Takes the choice rather than the
+    /// document, because what there is room for is a property of the window: a
+    /// book still being read is not on screen, and asking about the tab in
+    /// front would answer for a different document.
+    pub(crate) fn laid_out(&self, chosen: Layout) -> Layout {
+        match chosen.is_spread() && self.spread_fits() {
             true => Layout::Spread,
             false => Layout::Single,
         }
     }
 
-    /// Whether two pages fit side by side at the size a page is drawn.
+    /// How much width one page is given.
+    ///
+    /// Split from the window rather than measured from the pages. A page's own
+    /// width is only known once it has been read, and until then it is guessed
+    /// from the first page — so a row laid out around the pages in it moves
+    /// every time one of them arrives. Dividing the window instead gives every
+    /// page a column that was decided before the book was opened, and a page
+    /// that does not fill its column is centred in it.
+    pub(crate) fn column(&self, layout: Layout) -> f32 {
+        let room = (self.reader_width - GAP * 2.).max(0.);
+
+        match layout.is_spread() {
+            true => ((room - SEAM) / 2.).max(0.),
+            false => room,
+        }
+    }
+
+    /// Whether there is room for two pages side by side.
+    ///
+    /// Judged on the column the window can give a page, not on the pages
+    /// themselves: the pages of a book are not all one shape, and a rule that
+    /// consulted them would change its mind as they arrived.
+    ///
+    /// Before the first frame there is no width to judge against. What the
+    /// reader asked for is a better guess than the smaller layout: guessing
+    /// wrong here scrolls the book to a row counted the other way, which opens
+    /// it in the wrong place.
     fn spread_fits(&self) -> bool {
-        let Some(open) = self.open_document() else {
-            return false;
-        };
+        if self.reader_width <= 0. {
+            return true;
+        }
 
-        // Measured against the first page, like every other page is.
-        let wanted = open.width_of(1, self.page_height()) * 2. + SEAM;
-
-        self.reader_width > 0. && wanted <= self.reader_width
+        self.column(Layout::Spread) >= NARROWEST_PAGE
     }
 
     /// Shows the pages one at a time or two, and remembers which per book.
@@ -2098,12 +2167,18 @@ impl Pedro {
 
         open.layout = open.layout.toggled();
         let page = open.page;
+
         let layout = self.layout();
+        let Some(open) = self.document_mut() else {
+            return;
+        };
+        open.lay_out(layout);
+        let row = open.rows.row_of(page);
 
         // The list is keyed by the layout, so the new one starts unscrolled;
         // put it back on the page the reader was reading.
         if let Some(scroll) = self.page_scroll() {
-            scroll.scroll_to_item(layout.row(page), ScrollStrategy::Top);
+            scroll.scroll_to_item(row, ScrollStrategy::Top);
         }
 
         self.save_reading_position(cx);
@@ -2304,7 +2379,15 @@ impl Pedro {
             false => 0.,
         };
 
-        self.reader_width = (f32::from(window.viewport_size().width) - sidebar - chat).max(0.);
+        // Kept once it is known, rather than overwritten with whatever a frame
+        // that has not been laid out yet reports. A width of nothing means the
+        // layout is unknown, and a layout that becomes unknown again every few
+        // frames flips the book between one page and two — which resets the
+        // list, loses the place, and draws again, forever.
+        let width = f32::from(window.viewport_size().width) - sidebar - chat;
+        if width > 0. {
+            self.reader_width = width;
+        }
 
         // A window that has just crossed the width two pages need lays the book
         // out in a different number of rows, and the list is keyed by that — so
@@ -2323,10 +2406,15 @@ impl Pedro {
             );
             self.showing = showing;
 
-            if let Some(page) = self.open_document().map(|open| open.page)
+            let row = self.document_mut().map(|open| {
+                open.lay_out(showing);
+                open.rows.row_of(open.page)
+            });
+
+            if let Some(row) = row
                 && let Some(scroll) = self.page_scroll()
             {
-                scroll.scroll_to_item(showing.row(page), ScrollStrategy::Top);
+                scroll.scroll_to_item(row, ScrollStrategy::Top);
             }
         }
     }

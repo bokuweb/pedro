@@ -220,3 +220,66 @@ fn character_boxes_sit_on_the_ink_of_a_plain_page() {
         "the boxes and the ink disagree on a page with nothing to confuse them"
     );
 }
+
+/// A book is not always all one shape: a plan or a scanned spread turns up
+/// sideways among upright pages, and every page has to answer for itself.
+#[test]
+fn a_book_of_mixed_page_sizes_reports_each_one() {
+    use pedro_pdf::fixtures::{Page, pdf_with_sizes};
+
+    let path = std::env::temp_dir().join("pedro-pdf-mixed.pdf");
+    std::fs::write(
+        &path,
+        pdf_with_sizes(&[
+            Page::sized("upright", 595., 842.),
+            Page::sized("sideways", 1191., 842.),
+            Page::sized("upright again", 595., 842.),
+        ]),
+    )
+    .expect("a writable file");
+
+    let document = Document::open(&path).expect("a readable pdf");
+    assert_eq!(document.page_count(), 3);
+
+    let first = document.page_size(0).expect("a size");
+    assert!((first.width - 595.).abs() < 1., "{first:?}");
+    assert!((first.height - 842.).abs() < 1., "{first:?}");
+
+    let sideways = document.page_size(1).expect("a size");
+    assert!(sideways.width > sideways.height, "{sideways:?}");
+    assert!((sideways.width - 1191.).abs() < 1., "{sideways:?}");
+
+    let third = document.page_size(2).expect("a size");
+    assert!((third.width - 595.).abs() < 1., "{third:?}");
+}
+
+/// The page table and the pages themselves have to agree about how large a page
+/// is.
+///
+/// A printed book is inset from its media box to its crop box, and pdfium
+/// answers in both spaces depending on what is asked — which has already cost
+/// this reader once, when every mark landed a line above its words. The reader
+/// now lays a book out from the page table and draws it from the pages, so a
+/// disagreement between the two would stretch every page of a cropped book.
+#[test]
+fn the_page_table_agrees_with_the_pages_about_size() {
+    use pedro_pdf::fixtures::pdf_with_crop_box;
+
+    let path = std::env::temp_dir().join("pedro-pdf-cropped-sizes.pdf");
+    std::fs::write(&path, pdf_with_crop_box(&["one", "two", "three"], 20.))
+        .expect("a writable file");
+
+    let document = Document::open(&path).expect("a readable pdf");
+    let table = document.page_sizes().expect("every size");
+
+    assert_eq!(table.len(), 3);
+    for (index, from_table) in table.iter().enumerate() {
+        let from_page = document.page_size(index as u32).expect("a size");
+
+        assert!(
+            (from_table.width - from_page.width).abs() < 0.5
+                && (from_table.height - from_page.height).abs() < 0.5,
+            "page {index}: the table says {from_table:?}, the page says {from_page:?}"
+        );
+    }
+}
