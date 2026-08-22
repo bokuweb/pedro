@@ -259,14 +259,19 @@ impl Panel {
 
         let entries = hits
             .iter()
-            .map(|hit| {
+            .enumerate()
+            .map(|(index, hit)| {
                 let book = titles
                     .get(hit.book_id.as_str())
                     .cloned()
                     .unwrap_or_else(|| "a book".into());
 
+                // The position in the results as well as the place it points
+                // at: two passages found on one page would otherwise be one row
+                // as far as the list is concerned, and pressing either could
+                // only ever offer the page rather than the passage.
                 Entry::new(
-                    format!("hit:{}:{}", hit.book_id, hit.page_number),
+                    format!("hit:{index}:{}:{}", hit.book_id, hit.page_number),
                     one_line(&hit.text),
                 )
                 .icon(IconName::Search)
