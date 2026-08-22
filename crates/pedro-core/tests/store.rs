@@ -692,3 +692,26 @@ fn a_library_from_before_shelves_keeps_its_conversations() {
         .expect("a stored message");
     assert_eq!(store.messages(&about).expect("a query").len(), 1);
 }
+
+/// A library somewhere else, for trying a change against a copy of a real one.
+///
+/// Serialised by hand rather than by luck: the variable is process-wide, and a
+/// second test reading it while this one has it set would open the wrong
+/// library — so every test that touches it lives here, in one test.
+#[test]
+fn the_library_can_be_told_where_to_live() {
+    let root = std::env::temp_dir().join("pedro-store-named");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Safety: this test owns the variable, and sets it back before it returns.
+    unsafe { std::env::set_var("PEDRO_LIBRARY_PATH", &root) };
+    let opened = Store::open_default();
+    unsafe { std::env::remove_var("PEDRO_LIBRARY_PATH") };
+
+    assert_eq!(opened.expect("a writable library").root(), root);
+
+    // And with nothing named, the reader's own library is where it always was.
+    let usual = Store::open_default().expect("a writable library");
+    assert!(usual.root().ends_with("pedro"), "{:?}", usual.root());
+    assert_ne!(usual.root(), root);
+}
