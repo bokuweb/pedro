@@ -96,6 +96,16 @@ chatbook's real thinking is — be covered by tests that run without a window.
 cargo run -p pedro-app
 ```
 
+The library lives in the application support directory. `PEDRO_LIBRARY_PATH`
+names another one, which is how a change is tried against a copy of a real
+library — a migration, a screen that has never been seen with real books in it —
+without doing it to your own:
+
+```bash
+cp -r ~/Library/Application\ Support/pedro /tmp/a-copy
+PEDRO_LIBRARY_PATH=/tmp/a-copy cargo run -p pedro-app
+```
+
 Add a PDF with the plus in the sidebar header, or paste a Google Drive link
 into the field the button beside it opens. Open it, drag across a passage,
 type a question, and press the arrow. The answer streams into the panel beside

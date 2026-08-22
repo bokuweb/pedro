@@ -5,8 +5,11 @@
 //! cargo run -p pedro-core --example ask_shelf -- "この2冊に共通する話題は?"
 //! ```
 //!
-//! Runs against a copy of the library at `/tmp/pedro-shelf-live` rather than
-//! the reader's own, because it makes a shelf and holds a conversation.
+//! Makes a shelf and holds a conversation, so point it at a copy:
+//!
+//! ```bash
+//! PEDRO_LIBRARY_PATH=/tmp/a-copy cargo run -p pedro-core --example ask_shelf -- "…"
+//! ```
 
 use pedro_core::chat::{Question, Subject, ask};
 use pedro_core::store::Store;
@@ -23,7 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
 
-    let store = Store::open(std::path::Path::new("/tmp/pedro-shelf-live"))?;
+    // This makes a shelf and clears the ones already there, so it refuses to
+    // run against the library it would find on its own. A diagnostic that can
+    // quietly rearrange the reader's shelves is not one worth having.
+    if std::env::var_os("PEDRO_LIBRARY_PATH").is_none() {
+        eprintln!(
+            "This clears the shelves of whatever library it opens.\n\
+             Point it at a copy:\n\n    \
+             PEDRO_LIBRARY_PATH=/tmp/a-copy cargo run -p pedro-core --example ask_shelf -- \"…\""
+        );
+        std::process::exit(2);
+    }
+
+    let store = Store::open_default()?;
+    println!("library: {}", store.root().display());
 
     // A shelf of everything, made fresh each run.
     for existing in store.folders()? {

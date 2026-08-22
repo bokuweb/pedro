@@ -873,7 +873,19 @@ fn hash_of(bytes: &[u8]) -> String {
 }
 
 /// Where the platform keeps application data, plus pedro's own directory.
+/// Where the library lives.
+///
+/// `PEDRO_LIBRARY_PATH` names another one, the way `PEDRO_PDFIUM_PATH` and
+/// `PEDRO_EMBEDDING_PATH` name theirs. It is what lets a change be tried
+/// against a copy of a real library — a migration, a screen that has never been
+/// seen with real books in it — without doing it to the reader's own.
 fn default_root() -> Result<PathBuf, StoreError> {
+    if let Some(named) = std::env::var_os("PEDRO_LIBRARY_PATH")
+        && !named.is_empty()
+    {
+        return Ok(PathBuf::from(named));
+    }
+
     Ok(dirs::data_dir()
         .ok_or(StoreError::NoDataDirectory)?
         .join("pedro"))
