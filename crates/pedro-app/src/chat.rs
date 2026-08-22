@@ -46,8 +46,10 @@ const A_FRAME: Duration = Duration::from_millis(8);
 
 /// The conversation the chat panel is showing.
 pub struct Conversation {
-    /// The stored passage this conversation hangs off, once there is one.
-    pub highlight_id: Option<String>,
+    /// What this conversation is filed under, once it is filed: the passage it
+    /// hangs off, or the shelf it was put to. `None` until the first question
+    /// about a passage has stored one.
+    pub about: Option<pedro_core::Conversation>,
     /// The passage the question is about, as the reader marked it.
     pub passage: SharedString,
     /// Where that passage is, so a stored highlight can be found again.
@@ -90,7 +92,7 @@ pub struct Conversation {
 impl Conversation {
     pub fn about(passage: impl Into<SharedString>, page: u32) -> Self {
         Self {
-            highlight_id: None,
+            about: None,
             passage: passage.into(),
             page,
             messages: Vec::new(),

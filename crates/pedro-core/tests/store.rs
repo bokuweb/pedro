@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use pedro_core::Conversation;
 use pedro_core::model::{NewHighlight, ReadingState, Role};
 use pedro_core::store::{Store, StoreError};
 use pedro_core::{Citation, CitationKind, PageLocation};
@@ -135,7 +136,12 @@ fn removing_a_book_takes_its_highlights_conversations_and_bytes() {
         .add_highlight(&book.id, highlight_of("a", 1))
         .expect("a stored book");
     store
-        .add_message(&highlight.id, Role::User, "これは?", &[])
+        .add_message(
+            &Conversation::Highlight(highlight.id.clone()),
+            Role::User,
+            "これは?",
+            &[],
+        )
         .expect("a stored highlight");
 
     let path = store.document_path(&book);
@@ -143,7 +149,12 @@ fn removing_a_book_takes_its_highlights_conversations_and_bytes() {
 
     assert!(store.book(&book.id).expect("a query").is_none());
     assert!(store.highlights(&book.id).expect("a query").is_empty());
-    assert!(store.messages(&highlight.id).expect("a query").is_empty());
+    assert!(
+        store
+            .messages(&Conversation::Highlight(highlight.id.clone()))
+            .expect("a query")
+            .is_empty()
+    );
     assert!(!path.exists());
 }
 
@@ -274,22 +285,30 @@ fn a_conversation_is_stored_in_the_order_it_happened() {
         kind: CitationKind::Pdf,
         text: "passage".to_owned(),
         page: Some(PageLocation::Found(1)),
+        book: None,
         url: None,
     };
 
     store
-        .add_message(&highlight.id, Role::User, "これは?", &[])
+        .add_message(
+            &Conversation::Highlight(highlight.id.clone()),
+            Role::User,
+            "これは?",
+            &[],
+        )
         .expect("a stored highlight");
     store
         .add_message(
-            &highlight.id,
+            &Conversation::Highlight(highlight.id.clone()),
             Role::Assistant,
             "こうです[1]\n\n## Sources\n[1] 「passage」",
             std::slice::from_ref(&citation),
         )
         .expect("a stored highlight");
 
-    let messages = store.messages(&highlight.id).expect("a query");
+    let messages = store
+        .messages(&Conversation::Highlight(highlight.id.clone()))
+        .expect("a query");
 
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, Role::User);
@@ -303,7 +322,12 @@ fn a_message_on_a_highlight_that_is_not_there_says_so() {
     let (store, _root) = library("message-missing");
 
     let error = store
-        .add_message("nope", Role::User, "これは?", &[])
+        .add_message(
+            &Conversation::Highlight("nope".to_owned()),
+            Role::User,
+            "これは?",
+            &[],
+        )
         .unwrap_err();
     assert!(matches!(error, StoreError::NoSuchHighlight(_)), "{error}");
 }
@@ -452,4 +476,219 @@ fn books_stored_without_an_index_are_indexed_later() {
     assert_eq!(store.index_missing().expect("a backfill"), 1);
     assert_eq!(store.search("runtime").expect("a search").len(), 1);
     assert_eq!(store.index_missing().expect("a second backfill"), 0);
+}
+
+/// A shelf holds books, and says how many without being asked twice.
+#[test]
+fn a_shelf_counts_the_books_on_it() {
+    let (mut store, root) = library("shelf-count");
+    let shelf = store.create_folder("あとで読む").expect("a shelf");
+    assert_eq!(shelf.book_count, 0);
+
+    let one = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+    let two = store
+        .add_document(&pdf(&root, "two.pdf", &["preface", "body"]))
+        .expect("a readable pdf");
+
+    store.move_book(&one.id, Some(&shelf.id)).expect("a move");
+    store.move_book(&two.id, Some(&shelf.id)).expect("a move");
+
+    let shelves = store.folders().expect("a query");
+    assert_eq!(shelves.len(), 1);
+    assert_eq!(shelves[0].book_count, 2);
+
+    let on_it: Vec<String> = store
+        .books_in(&shelf.id)
+        .expect("a query")
+        .into_iter()
+        .map(|book| book.file_name)
+        .collect();
+    assert_eq!(on_it.len(), 2);
+    assert!(on_it.contains(&"one.pdf".to_owned()));
+
+    // And the book knows where it is, which is what the sidebar draws from.
+    let book = store.book(&one.id).expect("a query").expect("the book");
+    assert_eq!(book.folder_id, Some(shelf.id));
+}
+
+/// A book is on one shelf at a time, so moving it is a move and not a copy.
+#[test]
+fn moving_a_book_takes_it_off_the_shelf_it_was_on() {
+    let (mut store, root) = library("shelf-move");
+    let from = store.create_folder("読みかけ").expect("a shelf");
+    let to = store.create_folder("読み終わった").expect("a shelf");
+    let book = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+
+    store.move_book(&book.id, Some(&from.id)).expect("a move");
+    store.move_book(&book.id, Some(&to.id)).expect("a move");
+
+    assert!(store.books_in(&from.id).expect("a query").is_empty());
+    assert_eq!(store.books_in(&to.id).expect("a query").len(), 1);
+
+    // And off every shelf, which is where a book starts.
+    store.move_book(&book.id, None).expect("a move");
+    assert!(store.books_in(&to.id).expect("a query").is_empty());
+    assert_eq!(
+        store
+            .book(&book.id)
+            .expect("a query")
+            .expect("it")
+            .folder_id,
+        None
+    );
+}
+
+/// A shelf is an arrangement of the library, not a part of it: throwing the
+/// arrangement away must not throw the books away with it.
+#[test]
+fn deleting_a_shelf_keeps_its_books_and_drops_its_conversation() {
+    let (mut store, root) = library("shelf-delete");
+    let shelf = store.create_folder("暗号").expect("a shelf");
+    let book = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+    store.move_book(&book.id, Some(&shelf.id)).expect("a move");
+
+    let about = Conversation::Folder(shelf.id.clone());
+    store
+        .add_message(&about, Role::User, "この2冊はどう違う?", &[])
+        .expect("a stored message");
+    assert_eq!(store.messages(&about).expect("a query").len(), 1);
+
+    store.remove_folder(&shelf.id).expect("a removal");
+
+    assert!(store.folders().expect("a query").is_empty());
+    assert!(store.messages(&about).expect("a query").is_empty());
+
+    // The book is still in the library, and on no shelf.
+    let book = store.book(&book.id).expect("a query").expect("the book");
+    assert_eq!(book.folder_id, None);
+}
+
+/// Two conversations, one about a passage and one about a shelf, do not run
+/// into each other — which is the whole reason for the check constraint.
+#[test]
+fn a_shelf_conversation_is_not_a_highlight_conversation() {
+    let (mut store, root) = library("shelf-conversations");
+    let shelf = store.create_folder("暗号").expect("a shelf");
+    let book = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+    store.move_book(&book.id, Some(&shelf.id)).expect("a move");
+
+    let highlight = store
+        .add_highlight(&book.id, highlight_of("本文", 2))
+        .expect("a stored highlight");
+
+    let on_shelf = Conversation::Folder(shelf.id.clone());
+    let on_passage = Conversation::Highlight(highlight.id.clone());
+
+    store
+        .add_message(&on_shelf, Role::User, "棚について", &[])
+        .expect("a stored message");
+    store
+        .add_message(&on_passage, Role::User, "この一節について", &[])
+        .expect("a stored message");
+
+    let shelf_turns = store.messages(&on_shelf).expect("a query");
+    assert_eq!(shelf_turns.len(), 1);
+    assert_eq!(shelf_turns[0].content, "棚について");
+    assert_eq!(shelf_turns[0].about, on_shelf);
+
+    let passage_turns = store.messages(&on_passage).expect("a query");
+    assert_eq!(passage_turns.len(), 1);
+    assert_eq!(passage_turns[0].content, "この一節について");
+}
+
+/// A conversation cannot hang off a shelf that is not there.
+#[test]
+fn a_message_about_a_shelf_that_is_not_there_says_so() {
+    let (store, _root) = library("shelf-missing");
+    let error = store
+        .add_message(
+            &Conversation::Folder("nope".to_owned()),
+            Role::User,
+            "これは?",
+            &[],
+        )
+        .expect_err("no such shelf");
+
+    assert!(matches!(error, StoreError::NoSuchFolder(id) if id == "nope"));
+}
+
+/// A library written before shelves existed still opens, and still holds every
+/// conversation it held.
+///
+/// The shelf migration cannot alter `chat_messages` in place — SQLite will not
+/// drop a NOT NULL — so it rebuilds the table and carries the rows across. A
+/// reader's conversations are the part of this file that cannot be rebuilt from
+/// their PDFs, which makes this the one migration worth a test of its own.
+#[test]
+fn a_library_from_before_shelves_keeps_its_conversations() {
+    let root = std::env::temp_dir().join("pedro-store-old-version");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a writable directory");
+
+    // Version 2, written by hand: the schema as it stood before shelves.
+    let old = rusqlite::Connection::open(root.join("pedro.sqlite3")).expect("a database");
+    old.execute_batch(
+        r#"
+        CREATE TABLE books (
+            id TEXT PRIMARY KEY, file_name TEXT NOT NULL, file_hash TEXT NOT NULL UNIQUE,
+            full_text TEXT NOT NULL, page_count INTEGER NOT NULL, outline TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_read_page INTEGER,
+            last_read_highlight_id TEXT, last_read_outline_open INTEGER,
+            last_read_chat_panel_open INTEGER
+        );
+        CREATE TABLE highlights (
+            id TEXT PRIMARY KEY, book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            selected_text TEXT NOT NULL, page_number INTEGER NOT NULL, rects TEXT NOT NULL,
+            color TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX highlights_by_book ON highlights(book_id);
+        CREATE TABLE chat_messages (
+            id TEXT PRIMARY KEY,
+            highlight_id TEXT NOT NULL REFERENCES highlights(id) ON DELETE CASCADE,
+            role TEXT NOT NULL, content TEXT NOT NULL, citations TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX messages_by_highlight ON chat_messages(highlight_id);
+
+        INSERT INTO books VALUES
+            ('b1', 'one.pdf', 'hash-1', 'preface', 1, NULL,
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL, NULL, NULL, NULL);
+        INSERT INTO highlights VALUES
+            ('h1', 'b1', 'preface', 1, '[]', 'yellow', '2026-01-01T00:00:00Z');
+        INSERT INTO chat_messages VALUES
+            ('m1', 'h1', 'user', 'これは?', NULL, '2026-01-01T00:00:00Z'),
+            ('m2', 'h1', 'assistant', 'こうです', NULL, '2026-01-01T00:00:01Z');
+
+        PRAGMA user_version = 2;
+        "#,
+    )
+    .expect("the old schema");
+    drop(old);
+
+    let store = Store::open(&root).expect("a library that migrates");
+
+    let messages = store
+        .messages(&Conversation::Highlight("h1".to_owned()))
+        .expect("a query");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content, "これは?");
+    assert_eq!(messages[1].content, "こうです");
+
+    // And the new half works on the migrated file.
+    let shelf = store.create_folder("あとで").expect("a shelf");
+    store.move_book("b1", Some(&shelf.id)).expect("a move");
+    assert_eq!(store.books_in(&shelf.id).expect("a query").len(), 1);
+
+    let about = Conversation::Folder(shelf.id.clone());
+    store
+        .add_message(&about, Role::User, "棚について", &[])
+        .expect("a stored message");
+    assert_eq!(store.messages(&about).expect("a query").len(), 1);
 }

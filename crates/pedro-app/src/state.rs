@@ -8,7 +8,7 @@
 use gpui::{SharedString, UniformListScrollHandle};
 use gpui_component::IconName;
 use pedro_agent::{AgentKind, DiscoveredAgent};
-use pedro_core::model::{Book, Highlight};
+use pedro_core::model::{Book, Folder, Highlight};
 use pedro_pdf::OutlineItem;
 
 use crate::chat::Conversation;
@@ -189,6 +189,13 @@ impl Entry {
 pub struct Section {
     pub title: SharedString,
     pub entries: Vec<Entry>,
+    /// The shelf this section is, when it is one.
+    ///
+    /// A shelf is a section whose header does something: it opens, it takes a
+    /// book dropped on it, and it can be renamed or thrown away. "Reading" and
+    /// "Recently added" are groupings rather than things, so they carry `None`
+    /// and their headers only fold.
+    pub shelf: Option<SharedString>,
 }
 
 impl Section {
@@ -196,6 +203,15 @@ impl Section {
         Self {
             title: title.into(),
             entries,
+            shelf: None,
+        }
+    }
+
+    fn shelf(folder: &Folder, entries: Vec<Entry>) -> Self {
+        Self {
+            title: folder.name.clone().into(),
+            entries,
+            shelf: Some(folder.id.clone().into()),
         }
     }
 
@@ -271,16 +287,41 @@ impl Panel {
     /// are different questions, and a library of forty books answers neither
     /// as one flat list.
     pub fn library(library: &Library) -> Self {
+        // Shelves first, in the order they were made, each one shown even when
+        // it is empty: a shelf that vanishes when its last book is moved off it
+        // is a shelf the reader cannot put anything back on.
+        let mut sections: Vec<Section> = library
+            .shelves()
+            .iter()
+            .map(|shelf| {
+                let on_it = library
+                    .books()
+                    .iter()
+                    .filter(|book| book.folder_id.as_deref() == Some(shelf.id.as_str()))
+                    .map(row_for)
+                    .collect();
+
+                Section::shelf(shelf, on_it)
+            })
+            .collect();
+
+        // Then the books on no shelf, split by whether the reader has been into
+        // them: "where was I" and "what did I add" are different questions, and
+        // a library of forty books answers neither as one flat list.
         let (reading, unread): (Vec<&Book>, Vec<&Book>) = library
             .books()
             .iter()
+            .filter(|book| book.folder_id.is_none())
             .partition(|book| book.reading.is_some());
 
-        let sections = [("Reading", reading), ("Recently added", unread)]
-            .into_iter()
-            .filter(|(_, books)| !books.is_empty())
-            .map(|(title, books)| Section::new(title, books.into_iter().map(row_for).collect()))
-            .collect();
+        sections.extend(
+            [("Reading", reading), ("Recently added", unread)]
+                .into_iter()
+                .filter(|(_, books)| !books.is_empty())
+                .map(|(title, books)| {
+                    Section::new(title, books.into_iter().map(row_for).collect())
+                }),
+        );
 
         Self::new(sections, library.empty_message())
     }
@@ -324,7 +365,10 @@ impl Panel {
             .map(|highlight| {
                 // The one being answered right now says so, since the answer
                 // lands in a panel the reader may not be looking at.
-                let open = chat.filter(|chat| chat.highlight_id.as_deref() == Some(&highlight.id));
+                let open = chat.filter(|chat| {
+                    chat.about.as_ref()
+                        == Some(&pedro_core::Conversation::Highlight(highlight.id.clone()))
+                });
                 let status = open.and_then(|chat| match (chat.is_answering(), &chat.error) {
                     (true, _) => Some(Status::Working),
                     (_, Some(_)) => Some(Status::Failed),
@@ -577,4 +621,15 @@ mod tests {
     fn detecting_is_not_a_problem() {
         assert!(!AgentStatus::Detecting.is_problem());
     }
+}
+
+/// A book's shelf menu: which book, and where the pointer was.
+///
+/// The position is kept because the menu is drawn over the whole panel rather
+/// than inside the row, which is what lets a menu longer than a row escape the
+/// row's bounds instead of being clipped by them.
+#[derive(Clone)]
+pub struct ShelfMenu {
+    pub book_id: SharedString,
+    pub at: gpui::Point<gpui::Pixels>,
 }

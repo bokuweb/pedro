@@ -11,8 +11,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::input::Input;
 use gpui_component::tooltip::Tooltip;
@@ -49,12 +49,15 @@ impl Pedro {
         Some(
             v_flex()
                 .w(px(self.sidebar.width))
-                .overflow_hidden()
+                // Not hidden: the shelf menu is drawn over the panel and a
+                // menu clipped to the panel is a menu with items missing.
+                .relative()
                 .h_full()
                 .flex_shrink_0()
                 .bg(palette::sidebar())
                 .border_r_1()
                 .border_color(palette::border())
+                .children(self.render_shelf_menu(cx))
                 .child(self.render_window_row(window, cx))
                 .child(self.render_navigation(cx))
                 .children(self.render_drive_field())
@@ -88,6 +91,7 @@ impl Pedro {
             .items_center()
             .child(self.render_add_button(cx))
             .child(self.render_drive_button(cx))
+            .children(self.render_new_shelf_button(cx))
             .child(
                 div()
                     .id("panel-hint")
@@ -261,6 +265,35 @@ impl Pedro {
             }))
     }
 
+    /// Makes a shelf, on the panel where shelves are shown.
+    ///
+    /// Beside the two ways a book gets in rather than under a menu: a shelf is
+    /// the other thing a reader makes in this panel, and they belong together.
+    fn render_new_shelf_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.active_rail != RailItem::Library {
+            return None;
+        }
+
+        Some(
+            div()
+                .id("panel-new-shelf")
+                .size(px(24.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|this| this.bg(palette::row_hover()))
+                .child(icon(IconName::FolderOpen, px(15.), palette::text_muted()))
+                .tooltip(move |window, cx| {
+                    Tooltip::new("New shelf — ask a group of books at once").build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.create_shelf(window, cx);
+                })),
+        )
+    }
+
     /// Where a Drive link is pasted, when that has been asked for.
     fn render_drive_field(&self) -> Option<impl IntoElement + use<>> {
         if !self.drive_open {
@@ -377,6 +410,18 @@ impl Pedro {
             IconName::ChevronRight
         };
 
+        // A shelf header is a thing rather than a grouping: it opens, and a
+        // book dropped on it lands there. The count sits beside the name so an
+        // empty shelf reads as empty rather than as broken.
+        let shelf = section.shelf.clone();
+        let open = shelf.clone();
+        let dropped = shelf.clone();
+        let count = shelf
+            .as_ref()
+            .map(|_| SharedString::from(section.entries.len().to_string()));
+        let tab_id = shelf.as_ref().map(|id| format!("shelf:{id}"));
+        let active = tab_id.is_some_and(|id| self.active_tab().is_some_and(|tab| tab.id == id));
+
         h_flex()
             .id(("section", index))
             .h(px(32.))
@@ -387,24 +432,92 @@ impl Pedro {
             .items_center()
             .rounded(px(8.))
             .cursor_pointer()
-            .hover(|this| this.bg(palette::row_hover()))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(index, cx)))
+            .when(active, |this| this.bg(palette::row_active()))
+            .when(!active, |this| {
+                this.hover(|this| this.bg(palette::row_hover()))
+            })
+            // A book being dragged over a shelf lights it, which is the only
+            // thing that says the drop will land rather than be ignored.
+            .drag_over::<DraggedBook>(|this, _, _, _| this.bg(palette::accent().opacity(0.26)))
+            .on_drop(cx.listener(move |this, book: &DraggedBook, _, cx| {
+                if let Some(shelf) = &dropped {
+                    this.shelve_book(&book.0, Some(shelf.as_ref()), cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| match &open {
+                // Clicking a shelf opens it; clicking a grouping folds it.
+                Some(shelf) => {
+                    let name = shelf.to_string();
+                    let title = this
+                        .library
+                        .shelves()
+                        .iter()
+                        .find(|folder| folder.id == name)
+                        .map(|folder| folder.name.clone())
+                        .unwrap_or_default();
+
+                    this.open_shelf(&name, &title, window, cx);
+                }
+                None => this.toggle_section(index, cx),
+            }))
+            .children(shelf.is_some().then(|| {
+                icon(
+                    IconName::Folder,
+                    px(13.),
+                    if active {
+                        palette::text()
+                    } else {
+                        palette::text_faint()
+                    },
+                )
+            }))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.))
-                    .text_color(palette::text_faint())
+                    .text_color(if active {
+                        palette::text()
+                    } else {
+                        palette::text_faint()
+                    })
                     .child(section.title.clone()),
             )
-            .child(icon(chevron, px(13.), palette::text_faint()))
+            .children(count.map(|count| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(palette::text_faint())
+                    .child(count)
+            }))
+            .child(
+                div()
+                    .id(("fold", index))
+                    .p(px(2.))
+                    .rounded(px(5.))
+                    .hover(|this| this.bg(palette::row_hover()))
+                    .child(icon(chevron, px(13.), palette::text_faint()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_section(index, cx);
+                    })),
+            )
     }
 
     fn render_entry(&self, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = entry.current || self.active_tab().is_some_and(|tab| tab.id == entry.id);
         let clickable = entry.openable;
         let on_open = entry.clone();
+
+        // Only a book has a shelf to be put on, and only a book can be dragged
+        // onto one.
+        let book_id = entry
+            .id
+            .strip_prefix("book:")
+            .map(|id| SharedString::from(id.to_owned()));
+        let dragged = book_id.clone();
+        let menu_for = book_id.clone();
+        let label = entry.label.clone();
 
         let row = div()
             .id(entry.id.clone())
@@ -424,6 +537,22 @@ impl Pedro {
                         this.hover(|this| this.bg(palette::row_hover()))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.open_entry(&on_open, cx)))
+            })
+            .when_some(dragged, |this, id| {
+                // The ghost is the title alone: dragging a three-line card
+                // across the panel hides the row it is aimed at.
+                this.on_drag(DraggedBook(id), move |_, _, _, cx| {
+                    cx.new(|_| DragGhost(label.clone()))
+                })
+            })
+            .when_some(menu_for, |this, id| {
+                this.on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_shelf_menu(&id, event.position, cx);
+                    }),
+                )
             });
 
         let row = if entry.is_compact() {
@@ -479,6 +608,151 @@ impl Pedro {
                 cx.stop_propagation();
                 this.remove_entry(&on_remove, cx);
             }))
+    }
+
+    /// The menu of shelves a book can be put on.
+    ///
+    /// Drawn over the whole panel rather than inside the row, so a library with
+    /// eight shelves is not clipped to the height of one row.
+    pub(crate) fn render_shelf_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let menu = self.shelf_menu.clone()?;
+        let book = self
+            .library
+            .books()
+            .iter()
+            .find(|book| book.id == menu.book_id.as_ref())?;
+
+        let on_a_shelf = book.folder_id.clone();
+        let shelves = self.library.shelves();
+
+        let mut items: Vec<gpui::AnyElement> = shelves
+            .iter()
+            .map(|shelf| {
+                let here = on_a_shelf.as_deref() == Some(shelf.id.as_str());
+                let id = SharedString::from(shelf.id.clone());
+                let book_id = menu.book_id.clone();
+
+                self.render_menu_item(
+                    SharedString::from(format!("shelf-menu:{}", shelf.id)),
+                    shelf.name.clone().into(),
+                    here,
+                    cx.listener(
+                        move |this: &mut Pedro,
+                              _: &gpui::ClickEvent,
+                              _: &mut Window,
+                              cx: &mut Context<Pedro>| {
+                            cx.stop_propagation();
+                            this.shelve_book(&book_id, Some(id.as_ref()), cx);
+                            this.close_shelf_menu(cx);
+                        },
+                    ),
+                )
+                .into_any_element()
+            })
+            .collect();
+
+        if on_a_shelf.is_some() {
+            let book_id = menu.book_id.clone();
+            items.push(
+                self.render_menu_item(
+                    "shelf-menu:none".into(),
+                    "Take off the shelf".into(),
+                    false,
+                    cx.listener(
+                        move |this: &mut Pedro,
+                              _: &gpui::ClickEvent,
+                              _: &mut Window,
+                              cx: &mut Context<Pedro>| {
+                            cx.stop_propagation();
+                            this.shelve_book(&book_id, None, cx);
+                            this.close_shelf_menu(cx);
+                        },
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+
+        if shelves.is_empty() {
+            items.push(
+                self.render_menu_item(
+                    "shelf-menu:new".into(),
+                    "New shelf".into(),
+                    false,
+                    cx.listener(
+                        |this: &mut Pedro,
+                         _: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Pedro>| {
+                            cx.stop_propagation();
+                            this.create_shelf(window, cx);
+                            this.close_shelf_menu(cx);
+                        },
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+
+        Some(
+            div()
+                .id("shelf-menu")
+                .absolute()
+                .left(menu.at.x)
+                .top(menu.at.y)
+                .w(px(200.))
+                .p(px(4.))
+                .rounded(px(10.))
+                .bg(palette::surface())
+                .border_1()
+                .border_color(palette::border())
+                .shadow_lg()
+                .child(
+                    div()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .text_size(px(11.))
+                        .text_color(palette::text_faint())
+                        .child("Put on a shelf"),
+                )
+                .children(items),
+        )
+    }
+
+    fn render_menu_item(
+        &self,
+        id: SharedString,
+        label: SharedString,
+        checked: bool,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> impl IntoElement {
+        h_flex()
+            .id(id)
+            .h(px(28.))
+            .px(px(8.))
+            .gap(px(6.))
+            .items_center()
+            .rounded(px(7.))
+            .cursor_pointer()
+            .hover(|this| this.bg(palette::row_hover()))
+            .child(
+                div()
+                    .w(px(14.))
+                    .children(checked.then(|| icon(IconName::Check, px(12.), palette::accent()))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(palette::text())
+                    .child(label),
+            )
+            .on_click(on_click)
     }
 
     /// Which agent is answering, at the foot of the panel.
@@ -659,5 +933,30 @@ fn status_color(status: Status) -> Hsla {
     match status {
         Status::Working => palette::working(),
         Status::Failed => palette::danger(),
+    }
+}
+
+/// A book on its way to a shelf.
+#[derive(Clone)]
+pub(crate) struct DraggedBook(pub SharedString);
+
+/// What follows the pointer while a book is being dragged.
+struct DragGhost(SharedString);
+
+impl gpui::Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.))
+            .py(px(6.))
+            .max_w(px(240.))
+            .truncate()
+            .rounded(px(8.))
+            .bg(palette::surface())
+            .border_1()
+            .border_color(palette::border())
+            .shadow_lg()
+            .text_size(px(12.))
+            .text_color(palette::text())
+            .child(self.0.clone())
     }
 }

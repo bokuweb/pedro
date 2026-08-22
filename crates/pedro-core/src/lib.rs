@@ -15,9 +15,9 @@ pub mod model;
 pub mod prompt;
 pub mod store;
 
-pub use chat::{Asked, ChatError, Question, ask, prepare, record};
-pub use citation::{BookText, Citation, CitationKind, PageLocation, PageMiss};
+pub use chat::{Asked, ChatError, Question, Subject, ask, prepare, record};
+pub use citation::{BookText, Citation, CitationKind, CitedBook, PageLocation, PageMiss};
 pub use excerpt::{Excerpt, PAGE_DELIMITER, select_excerpt};
-pub use model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};
+pub use model::{Book, ChatMessage, Conversation, Folder, Highlight, NewHighlight, ReadingState};
 pub use prompt::{Role, Turn, build_conversation, build_system_prompt};
 pub use store::{Store, StoreError};

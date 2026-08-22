@@ -147,7 +147,9 @@ impl Table {
             .map_err(|err| EmbedError::Model(format!("tensor {name}: {err}")))?;
         let shape = view.shape();
         if shape.len() != 2 {
-            return Err(EmbedError::Model(format!("expected a table, got {shape:?}")));
+            return Err(EmbedError::Model(format!(
+                "expected a table, got {shape:?}"
+            )));
         }
 
         let (vocabulary, dimensions) = (shape[0], shape[1]);

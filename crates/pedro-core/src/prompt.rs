@@ -32,6 +32,9 @@ pub fn build_conversation(history: &[Turn], question: &str) -> Vec<Turn> {
 /// A passage the search found for the question, and the page it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retrieved {
+    /// Which book it is from, for a question put to a shelf. `None` when there
+    /// is only one book in play and naming it every time would be noise.
+    pub book: Option<String>,
     pub page: u32,
     pub text: String,
 }
@@ -160,20 +163,107 @@ fn found_elsewhere(retrieved: &[Retrieved]) -> String {
         return String::new();
     }
 
-    let blocks: String = retrieved
-        .iter()
-        .map(|passage| {
-            format!(
-                "--- RELATED PASSAGE (page {}) ---\n{}\n",
-                passage.page, passage.text
-            )
-        })
-        .collect();
+    let blocks: String = retrieved.iter().map(passage_block).collect();
 
     format!(
         "\nSearching the rest of the document for this question turned up these \
          passages. They are from elsewhere in it, so say which page a claim \
          comes from when you use one:\n{blocks}--- END RELATED PASSAGES ---\n"
+    )
+}
+
+/// One retrieved passage, labelled with where it came from.
+fn passage_block(passage: &Retrieved) -> String {
+    match &passage.book {
+        Some(book) => format!(
+            "--- PASSAGE ({}, page {}) ---\n{}\n",
+            book, passage.page, passage.text
+        ),
+        None => format!(
+            "--- RELATED PASSAGE (page {}) ---\n{}\n",
+            passage.page, passage.text
+        ),
+    }
+}
+
+/// Builds the system prompt for a question put to a shelf of books.
+///
+/// Nothing is excerpted here, because there is no one book to excerpt: what the
+/// model is given is what searching every book on the shelf for the question
+/// turned up. That makes the passages the whole of the context rather than an
+/// addition to it, and it makes "nothing on this shelf is about that" an answer
+/// the model has to be able to give — a search that finds nothing hands it an
+/// empty context, and it should say so rather than fill the space.
+///
+/// The sources it names are still quotations and nothing else. Which book each
+/// one came from is found by looking the quotation up, not by asking the model
+/// to label it: a title it copies slightly wrong would cost the reader the jump,
+/// and a quotation it copies slightly wrong is already handled.
+pub fn build_shelf_prompt(shelf: &str, retrieved: &[Retrieved], use_web_search: bool) -> String {
+    let books: Vec<&str> = {
+        let mut seen: Vec<&str> = Vec::new();
+        for passage in retrieved {
+            if let Some(book) = passage.book.as_deref()
+                && !seen.contains(&book)
+            {
+                seen.push(book);
+            }
+        }
+        seen
+    };
+
+    let context = match retrieved.is_empty() {
+        true => "Searching the shelf for this question turned up nothing. You have no \
+                 passages to work from."
+            .to_owned(),
+        false => format!(
+            "Searching the shelf for this question turned up these passages, from \
+             {}. They are all you have been shown of these books:\n\n{}--- END PASSAGES ---",
+            match books.len() {
+                0 | 1 => "one of its books".to_owned(),
+                n => format!("{n} of its books"),
+            },
+            retrieved.iter().map(passage_block).collect::<String>()
+        ),
+    };
+
+    let web_search_instruction = if use_web_search {
+        "\n\nWhen these passages do not contain enough information to answer the question, you \
+         may use web search to find additional context. Always indicate when you are using \
+         external sources."
+    } else {
+        "\n\nRespond using only these passages. When they do not contain the answer, say so \
+         clearly."
+    };
+
+    format!(
+        r###"You are a helpful AI assistant answering questions about a shelf of PDF documents called "{shelf}".
+
+{context}
+
+Instructions:
+- Answer based primarily on the passages above.
+- Say which book a claim comes from when you use one, because the reader is asking about several at once.
+- When the passages do not contain the answer, say it is not in what you were shown rather than not in the books, then provide what you know.
+- Keep answers concise and well-structured.
+- For tabular comparisons, use a markdown table.{web_search_instruction}
+
+When answering, follow these citation rules strictly:
+1. Reference sources inline using [n] notation.
+2. For PDF content: cite the exact passage you're referencing, quoted exactly as it appears above. Do not name the book in the entry — the quotation is what is looked up.
+3. For web search results: cite the page title and URL.
+4. At the end of every response, include a "## Sources" section listing all citations:
+   - [n] "exact quoted text from one of the passages"
+   - [n] "exact quoted text from the page" - Page Title - URL
+5. One quoted passage per entry. Do not quote a second passage in the same entry — give it its own [n]. Quote Japanese passages with 「」.
+6. End a web entry with its URL and write nothing after it: no parentheses around it, no trailing punctuation. A document entry carries no URL of its own.
+
+Example:
+Both books describe the same trade-off[1], though one puts it in terms of latency[2].
+
+## Sources
+[1] "the cost of a cache miss is paid on every request"
+[2] 「レイテンシは経路の長さで決まります」"###
     )
 }
 
@@ -295,7 +385,12 @@ mod tests {
 
     #[test]
     fn the_passage_and_the_text_travel_in_their_own_blocks() {
-        let prompt = build_system_prompt(&[excerpt(true)], &one("選んだ一節"), &nothing_found(), false);
+        let prompt = build_system_prompt(
+            &[excerpt(true)],
+            &one("選んだ一節"),
+            &nothing_found(),
+            false,
+        );
 
         let document = prompt
             .split("--- DOCUMENT START ---")

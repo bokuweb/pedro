@@ -18,8 +18,8 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use pedro_agent::DiscoveredAgent;
-use pedro_core::chat::{Question, prepare, record, run};
-use pedro_core::model::{Book, ChatMessage, Highlight, NewHighlight, ReadingState};
+use pedro_core::chat::{Question, Subject, prepare, record, run};
+use pedro_core::model::{Book, ChatMessage, Folder, Highlight, NewHighlight, ReadingState};
 use pedro_core::store::Store;
 use pedro_pdf::{Document, PageSize};
 
@@ -28,9 +28,10 @@ use crate::document::{OpenDocument, Page, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::panes::Pane;
-use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, Shown};
+use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, ShelfMenu, Shown};
 use gpui::UniformListScrollHandle;
 use pedro_agent::AgentError;
+use pedro_core::Conversation as CoreConversation;
 
 actions!(
     pedro,
@@ -47,6 +48,10 @@ actions!(
         ZoomReset
     ]
 );
+
+/// What the composer says it will ask about, which follows the tab.
+const ASK_A_DOCUMENT: &str = "Ask about this document… (⏎ to send, ⇧⏎ for a line)";
+const ASK_A_SHELF: &str = "Ask across these books… (⏎ to send, ⇧⏎ for a line)";
 
 /// How tall a page is drawn at 100%, in logical pixels.
 ///
@@ -107,6 +112,13 @@ pub struct Pedro {
     /// asks twice. A second press on the same row does it; a press anywhere
     /// else changes its mind.
     pub(crate) confirming_removal: Option<SharedString>,
+    /// The book whose shelf menu is open, and where to draw it.
+    ///
+    /// Hand-rolled rather than a popup component, because every other
+    /// affordance in this panel is — the remove button asks its question in
+    /// place — and because the menu's items are shelves, which are data rather
+    /// than actions to register.
+    pub(crate) shelf_menu: Option<ShelfMenu>,
     /// Where each page was drawn, recorded while the frame is laid out. A drag
     /// arrives in window coordinates and a page needs it as a fraction of
     /// itself.
@@ -138,6 +150,7 @@ pub struct Pedro {
     pub(crate) notice: Option<SharedString>,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
+
     /// Where a Google Drive link is pasted, and whether that row is showing.
     ///
     /// Hidden until it is asked for: most books come off the disk, and a field
@@ -148,6 +161,14 @@ pub struct Pedro {
     /// Whether a fetch is in flight. One at a time: the first thing a fetch
     /// may do is open a browser, and two of those at once is not a sign-in.
     pub(crate) drive_busy: bool,
+    /// Where the open shelf's name is edited.
+    pub(crate) shelf_name: Entity<InputState>,
+    /// What the composer is currently telling the reader it will ask about.
+    ///
+    /// Kept here so that following the tab costs one comparison a frame rather
+    /// than a window handle at every place a tab can change — several of which,
+    /// like opening the last-read book at startup, have no window to give.
+    composer_hint: &'static str,
 }
 
 impl Pedro {
@@ -166,7 +187,7 @@ impl Pedro {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(1, 6)
-                .placeholder("Ask about this document… (⏎ to send, ⇧⏎ for a line)")
+                .placeholder(ASK_A_DOCUMENT)
         });
         cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
             // Enter is bound to the secondary variant in `main`, which is what
@@ -190,6 +211,16 @@ impl Pedro {
         let agent_status = AgentStatus::Detecting;
         let library = Library::Opening;
 
+        // A shelf is named after it is made, so the field it is named in is
+        // part of the shelf's own view rather than a dialog in front of it.
+        let shelf_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name this shelf"));
+        cx.subscribe_in(&shelf_name, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_shelf_name(cx);
+            }
+        })
+        .detach();
+
         Self::detect_agents(cx);
         Self::open_library(cx);
 
@@ -197,6 +228,8 @@ impl Pedro {
             focus_handle: cx.focus_handle(),
             search,
             composer,
+            shelf_name,
+            composer_hint: ASK_A_DOCUMENT,
             web_search: true,
             active_rail: RailItem::Library,
             collapsed: HashSet::new(),
@@ -211,6 +244,7 @@ impl Pedro {
             answering: None,
             zoom: 1.0,
             confirming_removal: None,
+            shelf_menu: None,
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             selecting: false,
             attached: Vec::new(),
@@ -257,7 +291,8 @@ impl Pedro {
                     // type in two other crates.
                     let store = Store::open_default().map_err(|err| err.to_string())?;
                     let books = store.books().map_err(|err| err.to_string())?;
-                    Ok::<_, String>((store, books))
+                    let shelves = store.folders().map_err(|err| err.to_string())?;
+                    Ok::<_, String>((store, books, shelves))
                 })
                 .await;
 
@@ -269,16 +304,21 @@ impl Pedro {
 
     fn library_opened(
         &mut self,
-        opened: Result<(Store, Vec<Book>), String>,
+        opened: Result<(Store, Vec<Book>, Vec<Folder>), String>,
         cx: &mut Context<Self>,
     ) {
         self.library = match opened {
-            Ok((store, books)) => {
-                tracing::info!(books = books.len(), "opened the library");
+            Ok((store, books, shelves)) => {
+                tracing::info!(
+                    books = books.len(),
+                    shelves = shelves.len(),
+                    "opened the library"
+                );
                 Library::Ready {
                     root: store.root().to_path_buf(),
                     store: SharedStore::new(store),
                     books,
+                    shelves,
                 }
             }
             Err(why) => {
@@ -511,6 +551,205 @@ impl Pedro {
         cx.notify();
     }
 
+    /// Rereads the books and the shelves after something moved between them.
+    ///
+    /// Both together: a book joining a shelf changes the shelf's count as well
+    /// as the book's own row, and reading one without the other draws a shelf
+    /// that says two and holds three.
+    fn reload_shelves(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+
+        let read = {
+            let store = store.lock();
+            store.books().and_then(|books| {
+                let shelves = store.folders()?;
+                Ok((books, shelves))
+            })
+        };
+
+        match read {
+            Ok((books, shelves)) => {
+                if let Library::Ready {
+                    books: held,
+                    shelves: on,
+                    ..
+                } = &mut self.library
+                {
+                    *held = books;
+                    *on = shelves;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not reread the shelves");
+                self.notice = Some(err.to_string().into());
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Makes a shelf and opens it, so the reader lands somewhere they can name
+    /// it and put something on it rather than on a row that has just appeared.
+    pub(crate) fn create_shelf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+
+        // Numbered rather than blank: an untitled row among untitled rows is
+        // not a thing the reader can point at.
+        let taken = self.library.shelves().len();
+        let name = format!("Shelf {}", taken + 1);
+
+        let made = store.lock().create_folder(&name);
+        match made {
+            Ok(shelf) => {
+                self.reload_shelves(cx);
+                self.open_shelf(&shelf.id, &shelf.name, window, cx);
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not make a shelf");
+                self.notice = Some(err.to_string().into());
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn rename_shelf(&mut self, shelf_id: &str, name: &str, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+        if name.trim().is_empty() {
+            return;
+        }
+
+        if let Err(err) = store.lock().rename_folder(shelf_id, name) {
+            tracing::warn!(%err, "could not rename a shelf");
+            self.notice = Some(err.to_string().into());
+            cx.notify();
+            return;
+        }
+
+        // The open tab carries the old name in its title.
+        let tab_id = format!("shelf:{shelf_id}");
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.label = name.trim().to_owned().into();
+        }
+
+        self.reload_shelves(cx);
+    }
+
+    /// Removes a shelf, and closes it if it was open. The books stay.
+    pub(crate) fn delete_shelf(&mut self, shelf_id: &str, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+
+        if let Err(err) = store.lock().remove_folder(shelf_id) {
+            tracing::warn!(%err, "could not remove a shelf");
+            self.notice = Some(err.to_string().into());
+            cx.notify();
+            return;
+        }
+
+        let tab_id = format!("shelf:{shelf_id}");
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+            self.close_tab(index, cx);
+        }
+
+        self.reload_shelves(cx);
+    }
+
+    /// Puts a book on a shelf, or takes it off one with `None`.
+    pub(crate) fn shelve_book(
+        &mut self,
+        book_id: &str,
+        shelf_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.library.store() else {
+            return;
+        };
+
+        if let Err(err) = store.lock().move_book(book_id, shelf_id) {
+            tracing::warn!(%err, "could not shelve a book");
+            self.notice = Some(err.to_string().into());
+            cx.notify();
+            return;
+        }
+
+        self.reload_shelves(cx);
+    }
+
+    /// Opens a shelf as a tab of its own, which is where it is asked about.
+    pub(crate) fn open_shelf(
+        &mut self,
+        shelf_id: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = format!("shelf:{shelf_id}");
+        let existing = self.tabs.iter().position(|tab| tab.id == tab_id);
+
+        self.active_tab = Some(existing.unwrap_or_else(|| {
+            self.tabs.push(OpenTab::new(tab_id, name.to_owned()));
+            self.tabs.len() - 1
+        }));
+
+        let name = name.to_owned();
+        self.shelf_name
+            .update(cx, |field, cx| field.set_value(&name, window, cx));
+
+        // A shelf is a thing to ask, so the panel it is asked in opens with it
+        // rather than waiting to be found.
+        self.chat_pane.set_open(true);
+        self.open_shelf_conversation(shelf_id, &name, cx);
+        cx.notify();
+    }
+
+    /// Renames the open shelf to whatever is in the field.
+    pub(crate) fn commit_shelf_name(&mut self, cx: &mut Context<Self>) {
+        let Some(shelf) = self.active_shelf().cloned() else {
+            return;
+        };
+
+        let typed = self.shelf_name.read(cx).value().trim().to_string();
+        if typed.is_empty() || typed == shelf.name {
+            return;
+        }
+
+        self.rename_shelf(&shelf.id, &typed, cx);
+    }
+
+    /// The shelf a tab is showing, when the active tab is a shelf.
+    pub(crate) fn active_shelf(&self) -> Option<&Folder> {
+        let id = self.active_tab()?.id.strip_prefix("shelf:")?;
+
+        self.library.shelves().iter().find(|shelf| shelf.id == id)
+    }
+
+    /// Loads what has already been said to a shelf into the chat panel.
+    fn open_shelf_conversation(&mut self, shelf_id: &str, name: &str, cx: &mut Context<Self>) {
+        let stored = self.library.store().map(|store| {
+            store
+                .lock()
+                .messages(&CoreConversation::Folder(shelf_id.to_owned()))
+        });
+
+        let mut chat = Conversation::about(name.to_owned(), 0);
+        chat.about = Some(CoreConversation::Folder(shelf_id.to_owned()));
+        match stored {
+            Some(Ok(messages)) => chat.messages = messages,
+            Some(Err(err)) => tracing::warn!(%err, "could not read a shelf conversation"),
+            None => {}
+        }
+
+        self.chat = Some(chat);
+        cx.notify();
+    }
+
     /// Looks for what is in the search box, across every book.
     ///
     /// One query per change of the box rather than one per keystroke debounced:
@@ -616,6 +855,7 @@ impl Pedro {
             self.confirming_removal = None;
             cx.notify();
         }
+        self.close_shelf_menu(cx);
 
         if !entry.openable {
             return;
@@ -629,7 +869,7 @@ impl Pedro {
         }
 
         if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
-            self.open_marked_passage(&highlight_id.to_owned(), cx);
+            self.open_marked_passage(highlight_id, cx);
             return;
         }
 
@@ -637,13 +877,13 @@ impl Pedro {
             if let Some((book_id, page)) = hit.rsplit_once(':')
                 && let Ok(page) = page.parse::<u32>()
             {
-                self.open_found(&book_id.to_owned(), page, cx);
+                self.open_found(book_id, page, cx);
             }
             return;
         }
 
         if let Some(program) = entry.id.strip_prefix("agent:") {
-            self.choose_agent(&program.to_owned(), cx);
+            self.choose_agent(program, cx);
             return;
         }
 
@@ -1094,7 +1334,7 @@ impl Pedro {
     }
 
     /// Opens the book a search hit is in, at the page it is on.
-    fn open_found(&mut self, book_id: &str, page: u32, cx: &mut Context<Self>) {
+    pub(crate) fn open_found(&mut self, book_id: &str, page: u32, cx: &mut Context<Self>) {
         let Some(book) = self
             .library
             .books()
@@ -1145,7 +1385,7 @@ impl Pedro {
 
         let mut conversation =
             Conversation::about(highlight.selected_text.clone(), highlight.page_number);
-        conversation.highlight_id = Some(highlight.id.clone());
+        conversation.about = Some(CoreConversation::Highlight(highlight.id.clone()));
         self.chat = Some(conversation);
 
         self.show_chat(true, cx);
@@ -1157,7 +1397,7 @@ impl Pedro {
                 .spawn(async move {
                     store
                         .lock()
-                        .messages(&highlight_id)
+                        .messages(&CoreConversation::Highlight(highlight_id.clone()))
                         .map_err(|err| err.to_string())
                 })
                 .await;
@@ -1239,6 +1479,59 @@ impl Pedro {
     }
 
     /// Whether this row is waiting to be told a second time.
+    /// Opens the shelf menu for a book, at the pointer.
+    pub(crate) fn open_shelf_menu(
+        &mut self,
+        book_id: &str,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.shelf_menu = Some(ShelfMenu {
+            book_id: book_id.to_owned().into(),
+            at,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_shelf_menu(&mut self, cx: &mut Context<Self>) {
+        if self.shelf_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Arms a two-press confirmation on `id`. See [`Pedro::remove_entry`].
+    pub(crate) fn confirm(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.confirming_removal = Some(id);
+        cx.notify();
+    }
+
+    /// Opens a book as a tab, the way clicking its sidebar row does.
+    pub(crate) fn open_book_tab(&mut self, book_id: &str, cx: &mut Context<Self>) {
+        let Some(book) = self
+            .library
+            .books()
+            .iter()
+            .find(|book| book.id == book_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let tab_id = SharedString::from(format!("book:{}", book.id));
+        let existing = self.tabs.iter().position(|tab| tab.id == tab_id);
+
+        self.active_tab = Some(existing.unwrap_or_else(|| {
+            self.tabs.push(OpenTab::new(tab_id, book.file_name.clone()));
+            self.tabs.len() - 1
+        }));
+
+        if existing.is_none() {
+            self.load_book(book.id.clone(), cx);
+        }
+
+        cx.notify();
+    }
+
     pub(crate) fn is_confirming(&self, id: &SharedString) -> bool {
         self.confirming_removal.as_ref() == Some(id)
     }
@@ -1254,9 +1547,9 @@ impl Pedro {
         self.confirming_removal = None;
 
         if let Some(book_id) = entry.id.strip_prefix("book:") {
-            self.remove_book(&book_id.to_owned(), cx);
+            self.remove_book(book_id, cx);
         } else if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
-            self.remove_highlight(&highlight_id.to_owned(), cx);
+            self.remove_highlight(highlight_id, cx);
         }
     }
 
@@ -1301,11 +1594,9 @@ impl Pedro {
             return;
         };
 
-        if self
-            .chat
-            .as_ref()
-            .is_some_and(|chat| chat.highlight_id.as_deref() == Some(highlight_id))
-        {
+        if self.chat.as_ref().is_some_and(|chat| {
+            chat.about.as_ref() == Some(&CoreConversation::Highlight(highlight_id.to_owned()))
+        }) {
             self.close_chat(cx);
         }
 
@@ -1406,26 +1697,41 @@ impl Pedro {
             cx.notify();
             return;
         };
-        let Some(book_id) = self
-            .active_tab()
-            .and_then(|tab| tab.id.strip_prefix("book:"))
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        if self.attached.is_empty() {
-            self.notice = Some("Drag across the page to choose a passage first.".into());
-            cx.notify();
-            return;
-        }
-        let passages = std::mem::take(&mut self.attached);
+        // A shelf is asked as a whole, and a book is asked about a passage of
+        // it. Which of the two this is comes from the tab the reader is on.
+        let shelf = self
+            .active_shelf()
+            .map(|shelf| (shelf.id.clone(), shelf.name.clone()));
 
-        // The conversation belongs to the first passage, which is where the
-        // reader will look for it again.
-        let subject = passages
-            .first()
-            .map(|first| (first.selected_text.clone(), first.page_number))
-            .unwrap_or_default();
+        let (book_id, passages) = match &shelf {
+            Some(_) => (String::new(), Vec::new()),
+            None => {
+                let Some(book_id) = self
+                    .active_tab()
+                    .and_then(|tab| tab.id.strip_prefix("book:"))
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                if self.attached.is_empty() {
+                    self.notice = Some("Drag across the page to choose a passage first.".into());
+                    cx.notify();
+                    return;
+                }
+
+                (book_id, std::mem::take(&mut self.attached))
+            }
+        };
+
+        // The conversation belongs to the shelf, or to the first passage, which
+        // is where the reader will look for it again.
+        let subject = match &shelf {
+            Some((_, name)) => (name.clone(), 0),
+            None => passages
+                .first()
+                .map(|first| (first.selected_text.clone(), first.page_number))
+                .unwrap_or_default(),
+        };
         let conversation = self
             .chat
             .get_or_insert_with(|| Conversation::about(subject.0, subject.1));
@@ -1448,18 +1754,28 @@ impl Pedro {
             let asked = {
                 let store = store.lock();
 
-                let mut highlight_ids = Vec::with_capacity(passages.len());
-                for passage in passages {
-                    let stored = store
-                        .add_highlight(&book_id, passage)
-                        .map_err(|err| (err.to_string(), None))?;
-                    highlight_ids.push(stored.id);
-                }
+                let about = match &shelf {
+                    Some((id, _)) => Subject::Shelf(id.clone()),
+                    None => {
+                        // The passages are stored first: a conversation hangs
+                        // off a mark, so reopening the mark reopens what was
+                        // said about it.
+                        let mut highlight_ids = Vec::with_capacity(passages.len());
+                        for passage in passages {
+                            let stored = store
+                                .add_highlight(&book_id, passage)
+                                .map_err(|err| (err.to_string(), None))?;
+                            highlight_ids.push(stored.id);
+                        }
+
+                        Subject::Passages(highlight_ids)
+                    }
+                };
 
                 prepare(
                     &store,
                     &Question {
-                        highlight_ids,
+                        about,
                         text: question,
                         web_search,
                     },
@@ -1510,7 +1826,7 @@ impl Pedro {
             let store = store.lock();
             record(&store, &asked, &answer).map_err(|err| (err.to_string(), None))?;
             store
-                .messages(&asked.highlight_id)
+                .messages(&asked.about)
                 .map_err(|err| (err.to_string(), None))
         });
 
@@ -1809,6 +2125,23 @@ impl Pedro {
         self.turn_page(by, cx);
     }
 
+    /// Keeps the composer's prompt on the same subject as the tab.
+    fn follow_the_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = match self.active_shelf().is_some() {
+            true => ASK_A_SHELF,
+            false => ASK_A_DOCUMENT,
+        };
+
+        if self.composer_hint == wanted {
+            return;
+        }
+
+        self.composer_hint = wanted;
+        self.composer.update(cx, |composer, cx| {
+            composer.set_placeholder(wanted, window, cx)
+        });
+    }
+
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.search
             .update(cx, |search, cx| search.focus(window, cx));
@@ -1825,6 +2158,7 @@ impl Render for Pedro {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.write_a_little_more(window);
         self.slide_panes(window);
+        self.follow_the_tab(window, cx);
 
         v_flex()
             .id("pedro")

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use pedro_pdf::{Document, OutlineItem, PdfError};
-use pedro_search::{index, tokenize};
+use pedro_search::index;
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
@@ -22,7 +22,8 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::citation::Citation;
 use crate::model::{
-    Book, ChatMessage, DEFAULT_HIGHLIGHT_COLOR, Highlight, NewHighlight, ReadingState, Role,
+    Book, ChatMessage, Conversation, DEFAULT_HIGHLIGHT_COLOR, Folder, Highlight, NewHighlight,
+    ReadingState, Role,
 };
 
 /// The name of the database inside the library directory.
@@ -53,6 +54,9 @@ pub enum StoreError {
 
     #[error("no highlight with id {0}")]
     NoSuchHighlight(String),
+
+    #[error("no folder with id {0}")]
+    NoSuchFolder(String),
 }
 
 /// The reader's books, highlights and conversations.
@@ -78,10 +82,6 @@ const SEARCH_LIMIT: usize = 40;
 /// gap, far enough from both ends that a near miss on either side of it is
 /// still the right call.
 const RELATED: f32 = 0.25;
-
-/// How much of a question a passage has to contain before its words alone are
-/// reason enough to attach it. See [`Store::passages_for`].
-const COVERED: f32 = 0.5;
 
 impl Store {
     /// Opens the library under `root`, creating it if it is not there yet.
@@ -275,7 +275,7 @@ impl Store {
         ))
     }
 
-    /// The passages of one book that bear on `question`, best first.
+    /// The passages of `books` that bear on `question`, best first.
     ///
     /// What a question is answered from beyond the pages the reader marked:
     /// the book is searched for the question itself, and what it finds is
@@ -287,11 +287,11 @@ impl Store {
     /// prompt is indistinguishable, to whatever is reading it, from a passage
     /// that answers the question. So a passage joins the context only if it
     /// means something like the question — the vector floor — or actually
-    /// contains a fair part of it. Turning up nothing is a fine answer here,
-    /// and the marked pages are still sent.
+    /// holds the words in it that were worth typing. Turning up nothing is a
+    /// fine answer here, and the marked pages are still sent.
     pub fn passages_for(
         &self,
-        book_id: &str,
+        books: &[String],
         question: &str,
         limit: usize,
     ) -> Result<Vec<pedro_search::Hit>, StoreError> {
@@ -302,14 +302,15 @@ impl Store {
         let words = index::search(&self.connection, question, SEARCH_LIMIT)?
             .into_iter()
             .filter(|hit| !known.contains(hit.text.as_str()))
-            .filter(|hit| tokenize::coverage(question, &hit.text) >= COVERED)
             .collect();
 
-        Ok(pedro_search::fuse::reciprocal_rank(&[words, meaning], limit)
-            .into_iter()
-            .filter(|hit| hit.book_id == book_id)
-            .take(limit)
-            .collect())
+        Ok(
+            pedro_search::fuse::reciprocal_rank(&[words, meaning], limit)
+                .into_iter()
+                .filter(|hit| books.contains(&hit.book_id))
+                .take(limit)
+                .collect(),
+        )
     }
 
     /// The passages that mean something like `query`, or none when there is no
@@ -524,27 +525,30 @@ impl Store {
     /// Stores one turn of the conversation about a highlight.
     pub fn add_message(
         &self,
-        highlight_id: &str,
+        about: &Conversation,
         role: Role,
         content: &str,
         citations: &[Citation],
     ) -> Result<ChatMessage, StoreError> {
         let message = ChatMessage {
             id: new_id(),
-            highlight_id: highlight_id.to_owned(),
+            about: about.clone(),
             role,
             content: content.to_owned(),
             citations: citations.to_vec(),
             created_at: OffsetDateTime::now_utc(),
         };
 
+        let (highlight_id, folder_id) = about.columns();
+
         self.connection
             .execute(
-                "INSERT INTO chat_messages (id, highlight_id, role, content, citations, \
-                 created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO chat_messages (id, highlight_id, folder_id, role, content, \
+                 citations, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     message.id,
-                    message.highlight_id,
+                    highlight_id,
+                    folder_id,
                     write_role(message.role),
                     message.content,
                     (!citations.is_empty())
@@ -554,12 +558,16 @@ impl Store {
                 ],
             )
             .map_err(|err| match err {
-                // The only foreign key here is the highlight, so a violation
-                // can only mean the conversation has no passage to hang on.
+                // The foreign keys here are the highlight and the folder, and
+                // exactly one of them was given — so a violation can only mean
+                // the conversation has nothing to hang on.
                 rusqlite::Error::SqliteFailure(error, _)
                     if error.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    StoreError::NoSuchHighlight(highlight_id.to_owned())
+                    match about {
+                        Conversation::Highlight(id) => StoreError::NoSuchHighlight(id.clone()),
+                        Conversation::Folder(id) => StoreError::NoSuchFolder(id.clone()),
+                    }
                 }
                 other => StoreError::Database(other),
             })?;
@@ -567,14 +575,122 @@ impl Store {
         Ok(message)
     }
 
-    /// The conversation about a highlight, oldest first.
-    pub fn messages(&self, highlight_id: &str) -> Result<Vec<ChatMessage>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, highlight_id, role, content, citations, created_at FROM chat_messages \
-             WHERE highlight_id = ?1 ORDER BY created_at, rowid",
+    /// Makes a shelf. Names are not unique: two shelves called "later" are two
+    /// shelves, and telling them apart is the reader's business, not ours.
+    pub fn create_folder(&self, name: &str) -> Result<Folder, StoreError> {
+        let folder = Folder {
+            id: new_id(),
+            name: name.trim().to_owned(),
+            created_at: OffsetDateTime::now_utc(),
+            book_count: 0,
+        };
+
+        self.connection.execute(
+            "INSERT INTO folders (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![folder.id, folder.name, format_time(folder.created_at)],
         )?;
+
+        Ok(folder)
+    }
+
+    /// Every shelf, oldest first, each with how many books are on it.
+    ///
+    /// Oldest first rather than most-recently-used: a sidebar whose rows move
+    /// when they are used is a sidebar the reader has to read every time.
+    pub fn folders(&self) -> Result<Vec<Folder>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT f.id, f.name, f.created_at, count(b.id) AS book_count \
+             FROM folders f LEFT JOIN books b ON b.folder_id = f.id \
+             GROUP BY f.id ORDER BY f.created_at, f.rowid",
+        )?;
+        let folders = statement
+            .query_map([], read_folder)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(folders)
+    }
+
+    pub fn folder(&self, id: &str) -> Result<Option<Folder>, StoreError> {
+        Ok(self.folders()?.into_iter().find(|folder| folder.id == id))
+    }
+
+    pub fn rename_folder(&self, id: &str, name: &str) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE folders SET name = ?2 WHERE id = ?1",
+            params![id, name.trim()],
+        )?;
+
+        match changed {
+            0 => Err(StoreError::NoSuchFolder(id.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Removes a shelf and the conversation held with it.
+    ///
+    /// The books stay. A shelf is an arrangement of the library, not a part of
+    /// it, and deleting an arrangement must not delete what was arranged —
+    /// which is why `folder_id` is set to null rather than cascading.
+    pub fn remove_folder(&self, id: &str) -> Result<(), StoreError> {
+        let changed = self
+            .connection
+            .execute("DELETE FROM folders WHERE id = ?1", [id])?;
+
+        match changed {
+            0 => Err(StoreError::NoSuchFolder(id.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Puts a book on a shelf, or takes it off one with `None`.
+    ///
+    /// A book is on one shelf at a time. Two shelves sharing a book would make
+    /// "ask this shelf" ambiguous about which conversation a passage belongs
+    /// to, and the reader gains a filing system in return for that.
+    pub fn move_book(&self, book_id: &str, folder_id: Option<&str>) -> Result<(), StoreError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE books SET folder_id = ?2 WHERE id = ?1",
+                params![book_id, folder_id],
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    StoreError::NoSuchFolder(folder_id.unwrap_or_default().to_owned())
+                }
+                other => StoreError::Database(other),
+            })?;
+
+        match changed {
+            0 => Err(StoreError::NoSuchBook(book_id.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
+    /// The books on a shelf, most recently touched first.
+    pub fn books_in(&self, folder_id: &str) -> Result<Vec<Book>, StoreError> {
+        let mut statement = self.connection.prepare(&format!(
+            "{BOOK_COLUMNS} WHERE folder_id = ?1 ORDER BY updated_at DESC, rowid DESC"
+        ))?;
+        let books = statement
+            .query_map([folder_id], read_book)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(books)
+    }
+
+    /// One conversation, oldest first.
+    pub fn messages(&self, about: &Conversation) -> Result<Vec<ChatMessage>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, highlight_id, folder_id, role, content, citations, created_at \
+             FROM chat_messages \
+             WHERE highlight_id IS ?1 AND folder_id IS ?2 ORDER BY created_at, rowid",
+        )?;
+        let (highlight_id, folder_id) = about.columns();
         let messages = statement
-            .query_map([highlight_id], read_message)?
+            .query_map(params![highlight_id, folder_id], read_message)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(messages)
@@ -613,8 +729,8 @@ fn extract(path: &Path) -> Result<Extracted, StoreError> {
     })
 }
 
-const BOOK_COLUMNS: &str = "SELECT id, file_name, file_hash, page_count, outline, created_at, \
-                            updated_at, last_read_page, last_read_highlight_id, \
+const BOOK_COLUMNS: &str = "SELECT id, file_name, file_hash, page_count, outline, folder_id, \
+                            created_at, updated_at, last_read_page, last_read_highlight_id, \
                             last_read_outline_open, last_read_chat_panel_open FROM books";
 
 fn read_book(row: &Row<'_>) -> rusqlite::Result<Book> {
@@ -626,6 +742,7 @@ fn read_book(row: &Row<'_>) -> rusqlite::Result<Book> {
         file_hash: row.get("file_hash")?,
         page_count: row.get("page_count")?,
         outline: read_outline(row.get::<_, Option<String>>("outline")?.as_deref()),
+        folder_id: row.get("folder_id")?,
         created_at: read_time(&row.get::<_, String>("created_at")?),
         updated_at: read_time(&row.get::<_, String>("updated_at")?),
         reading: page.map(|page| ReadingState {
@@ -649,10 +766,32 @@ fn read_highlight(row: &Row<'_>) -> rusqlite::Result<Highlight> {
     })
 }
 
+fn read_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
+    Ok(Folder {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        created_at: read_time(&row.get::<_, String>("created_at")?),
+        book_count: row.get("book_count")?,
+    })
+}
+
 fn read_message(row: &Row<'_>) -> rusqlite::Result<ChatMessage> {
+    let highlight_id: Option<String> = row.get("highlight_id")?;
+    let folder_id: Option<String> = row.get("folder_id")?;
+
     Ok(ChatMessage {
         id: row.get("id")?,
-        highlight_id: row.get("highlight_id")?,
+        // The table's check constraint is what makes this total: exactly one of
+        // the two is filled in every row it will accept.
+        about: match (highlight_id, folder_id) {
+            (Some(id), _) => Conversation::Highlight(id),
+            (_, Some(id)) => Conversation::Folder(id),
+            (None, None) => {
+                return Err(rusqlite::Error::InvalidColumnName(
+                    "a message about neither a highlight nor a folder".to_owned(),
+                ));
+            }
+        },
         role: read_role(&row.get::<_, String>("role")?),
         content: row.get("content")?,
         citations: read_json(row.get::<_, Option<String>>("citations")?.as_deref()),
@@ -771,6 +910,54 @@ CREATE TABLE chat_messages (
 CREATE INDEX messages_by_highlight ON chat_messages(highlight_id);
 "#;
 
+/// Shelves, and conversations that hang off one.
+///
+/// A conversation belonged to a highlight, which is a passage of one book. A
+/// shelf is asked about as a whole, so its conversation cannot belong to a
+/// passage — hence a second column and the check that exactly one of them is
+/// filled. SQLite cannot drop a NOT NULL, so the table is rebuilt rather than
+/// altered; the rows are carried across, because a reader's conversations are
+/// the part of this file that cannot be rebuilt from the PDFs. All of it in
+/// one transaction, so a library that fails to open is still the library it was.
+const SHELVES: &str = r#"
+BEGIN;
+
+CREATE TABLE folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+ALTER TABLE books ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
+
+CREATE INDEX books_by_folder ON books(folder_id);
+
+CREATE TABLE chat_messages_new (
+    id TEXT PRIMARY KEY,
+    highlight_id TEXT REFERENCES highlights(id) ON DELETE CASCADE,
+    folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    citations TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((highlight_id IS NULL) <> (folder_id IS NULL))
+);
+
+INSERT INTO chat_messages_new
+    (id, highlight_id, folder_id, role, content, citations, created_at)
+SELECT id, highlight_id, NULL, role, content, citations, created_at
+FROM chat_messages;
+
+DROP INDEX messages_by_highlight;
+DROP TABLE chat_messages;
+ALTER TABLE chat_messages_new RENAME TO chat_messages;
+
+CREATE INDEX messages_by_highlight ON chat_messages(highlight_id);
+CREATE INDEX messages_by_folder ON chat_messages(folder_id);
+
+COMMIT;
+"#;
+
 /// Brings the database up to the current schema.
 ///
 /// `user_version` rather than a migrations table: there is one writer, one
@@ -786,6 +973,18 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
     if version < 2 {
         index::create(connection)?;
         connection.pragma_update(None, "user_version", 2)?;
+    }
+
+    if version < 3 {
+        // Foreign keys off for the rebuild: the rows are moved to a table the
+        // old name still points at, and a key checked halfway through that
+        // would fail on rows that are about to be correct.
+        connection.pragma_update(None, "foreign_keys", "OFF")?;
+        let rebuilt = connection.execute_batch(SHELVES);
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        rebuilt?;
+
+        connection.pragma_update(None, "user_version", 3)?;
     }
 
     Ok(())

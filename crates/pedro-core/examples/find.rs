@@ -44,7 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let passage: String = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
         let passage: String = passage.chars().take(90).collect();
 
-        println!("\n{book} p.{}  ({:.2})\n  {passage}…", hit.page_number, hit.score);
+        println!(
+            "\n{book} p.{}  ({:.2})\n  {passage}…",
+            hit.page_number, hit.score
+        );
     }
 
     Ok(())

@@ -24,6 +24,8 @@ pub struct Book {
     pub page_count: u32,
     /// Top-level chapters, empty when the book ships no outline.
     pub outline: Vec<OutlineItem>,
+    /// The shelf it is on, or `None` for a book that is not on one.
+    pub folder_id: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     /// Where the reader left off, absent on a book nobody has opened.
@@ -72,7 +74,8 @@ pub const DEFAULT_HIGHLIGHT_COLOR: &str = "#FFEB3B";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
     pub id: String,
-    pub highlight_id: String,
+    /// What the conversation is about.
+    pub about: Conversation,
     pub role: Role,
     /// The answer as the agent wrote it, `## Sources` section and all. The
     /// section is dropped when it is shown and when it is sent back as
@@ -80,6 +83,46 @@ pub struct ChatMessage {
     pub content: String,
     pub citations: Vec<Citation>,
     pub created_at: OffsetDateTime,
+}
+
+/// A shelf: books gathered so they can be asked about together.
+///
+/// Flat on purpose. A shelf is the unit a question is put to, and a question
+/// put to a tree would have to say how deep it goes — which is a thing to
+/// explain, and a thing to get wrong, in return for an arrangement most
+/// libraries this size never need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+    /// How many books are on it, which is what the sidebar shows.
+    pub book_count: u32,
+}
+
+/// What a conversation is about.
+///
+/// A question about a marked passage and a question about a shelf are the same
+/// conversation to everything downstream — same turns, same streaming, same
+/// citations — and differ only in what context is gathered for them and where
+/// the reader finds them again. This is that difference, named once.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Conversation {
+    /// A passage the reader marked. The conversation lives on the highlight,
+    /// which is where they will look for it.
+    Highlight(String),
+    /// A shelf, asked as a whole.
+    Folder(String),
+}
+
+impl Conversation {
+    /// The two columns a message row carries, exactly one of them filled.
+    pub fn columns(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Conversation::Highlight(id) => (Some(id), None),
+            Conversation::Folder(id) => (None, Some(id)),
+        }
+    }
 }
 
 /// How pages are laid out in the reader, remembered per book.

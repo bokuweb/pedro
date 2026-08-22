@@ -135,23 +135,78 @@ search answer *nothing*:
   0.43–0.81, and a question against another subject 0.06 and below
   (`cargo run -p pedro-search --example similarity`); the floor sits at 0.25, in
   the gap.
-- A bigram query is joined with OR, because a segmented phrase rarely matches
-  in full. One incidental bigram is therefore enough to return a passage —
-  fine in a search box, where ranking sorts it out and the reader can see what
-  they got, and not fine in a prompt, where a loosely related passage is
-  indistinguishable from one that answers the question. So the retrieval that
-  feeds a prompt also asks how much of the question the passage actually
-  contains, and takes it only at half or better.
-
-The result is that a question about primes carries the pages about primes, and
-a question about Italian recipes carries nothing at all
+The result is that a question about primes carries the pages about primes
 (`cargo run -p pedro-core --example context -- "…"`).
+
+### What keyword search still gets wrong
+
+A bigram query is joined with OR, because a segmented phrase rarely matches in
+full — and bm25 then lets filler accumulate. A long question is mostly
+particles, and a page matching fifteen common bigrams outranks the page holding
+the two words the question was actually about. Searching for `runtime` finds the
+right book at once; asking 「runtime が edge で動くという話はどの本?」 does not
+reach it, because forty fragments of the question drown two words of it.
+
+Two filters were tried against this and both were measured to be worse than
+none:
+
+- **How much of the question a passage holds.** Fails by length: a passage that
+  answers a forty-token question still only holds a twentieth of it, so a
+  threshold that is right for a phrase throws away every answer to a sentence.
+- **The rarest half of the question's words.** Fails by subject: in a book about
+  primes, 素数 is one of the *commonest* words in the index, so "rarest half"
+  discards exactly the word the question is about.
+
+What both attempts have in common is treating a term's weight as something a
+caller can recover after ranking. It is not: bm25 already knows every term's
+weight and spends it, and the fix belongs where the ranking is — capping what
+low-information terms can contribute, or segmenting Japanese into words rather
+than into pairs. Until then the retrieval is ungated, because missing the
+passage that answers the question is a worse failure than carrying one that does
+not.
 
 `vec0` measures in L2 unless asked otherwise, and for normalised vectors that is
 `sqrt(2 - 2·cos)` — a real distance, but not one a similarity can be read off by
 subtracting from one. It is asked for cosine, and a table built before it was
 asked is rebuilt rather than reused, because reading old distances as cosines
 would rank a book backwards.
+
+### Shelves: a question put to several books at once
+
+A question could only be put to a passage the reader had already marked, which
+makes a five-hundred-page book worse to ask about than to read — and makes a
+question that spans two books impossible to ask at all.
+
+A **shelf** is books gathered so they can be asked together, the way a notebook
+gathers sources. Clicking one opens it: the books on it in the middle, the
+conversation with it on the right. Nothing is excerpted, because there is no one
+book to excerpt; searching every book on the shelf for the question is what
+produces the context.
+
+Both kinds of question run the same course — the same turns, the same streaming,
+the same citations — and differ only in what context is gathered and where the
+reader finds the conversation again. That difference is named once, as
+`Conversation` and `Subject`, rather than assumed in a dozen places.
+
+Three decisions worth stating:
+
+- **Shelves are flat.** A question put to a tree would have to say how deep it
+  goes, which is a thing to explain and a thing to get wrong, in return for an
+  arrangement a library this size does not need.
+- **Deleting a shelf keeps its books.** An arrangement of the library is not
+  part of it, so `folder_id` is set to null rather than cascading. The
+  conversation with the shelf does go, because it was the shelf's.
+- **The model is never asked which book it is quoting.** A source is resolved by
+  looking its quotation up in each book on the shelf until one holds it. A title
+  the model copies slightly wrong would cost the reader the jump; a quotation it
+  copies slightly wrong is already handled, by the fragment matching the
+  citation lookup has always done.
+
+A conversation belonged to a highlight, so `chat_messages.highlight_id` was
+`NOT NULL`. SQLite will not drop that, so the table is rebuilt and its rows
+carried across in one transaction. A reader's conversations are the part of that
+file that cannot be rebuilt from their PDFs, which is why that migration has a
+test of its own and was also run against a copy of a real library.
 
 ## Layout
 
@@ -160,7 +215,7 @@ crates/
   pedro-agent   discovery (done) + invocation of the agent CLIs
   pedro-pdf     pdfium: pages, rasterisation, text with per-character boxes, outline
   pedro-search  the index: bigram FTS5, vectors, and the fusion of the two
-  pedro-core    the domain: store, library, excerpts, citations, chat
+  pedro-core    the domain: store, library, shelves, excerpts, citations, chat
   pedro-app     the GPUI application
 ```
 
@@ -196,7 +251,10 @@ Each step leaves the workspace building and tested.
    search box, and the passages a question carries beyond the pages the reader
    marked. Runnable as `cargo run -p pedro-core --example find` and
    `--example context`.
-8. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
+8. ✅ **Shelves** — books gathered onto a shelf, and a question put to the
+   shelf as a whole, answered from every book on it with citations that say
+   which book as well as which page.
+9. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
    continuous scroll, selection and highlights, chat panel with streaming and
    citations, contents, settings, and the keys for turning and zooming. Vim and
    Emacs bindings and two-page spreads are the parts of step 7 still open.
