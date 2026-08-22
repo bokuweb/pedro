@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for existing in store.folders()? {
         store.remove_folder(&existing.id)?;
     }
-    let shelf = store.create_folder("暗号とPython")?;
+    let shelf = store.create_folder("暗号とPython", None)?;
     for book in store.books()? {
         store.move_book(&book.id, Some(&shelf.id))?;
         println!("on the shelf: {}", book.file_name);

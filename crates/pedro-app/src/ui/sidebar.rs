@@ -18,6 +18,8 @@ use gpui_component::input::Input;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{IconName, h_flex, v_flex};
 
+use pedro_core::store::MAX_SHELF_DEPTH;
+
 use crate::app::Pedro;
 use crate::palette;
 use crate::state::{AgentStatus, Entry, RailItem, Section, Status};
@@ -38,6 +40,11 @@ const GROUP: &str = "row";
 
 /// The same, for the header of a shelf: the delete affordance hides in it.
 const HEADER: &str = "section-header";
+
+/// How far a shelf standing on another one is stepped in, and its books with
+/// it. Wide enough to read as one level at a glance, narrow enough that three
+/// of them still leave a title room in a 300 point panel.
+const STEP: f32 = 14.;
 
 impl Pedro {
     pub(crate) fn render_sidebar(
@@ -277,6 +284,10 @@ impl Pedro {
     /// row rather than an icon for the same reason the navigation is: a shelf
     /// and a folder are not the same thing, and only the word says which.
     ///
+    /// It is also where a shelf comes back to the top level from: dragging one
+    /// onto it takes it off whatever it was standing on, which is the only
+    /// place in the list that means "not inside anything".
+    ///
     /// A search replaces the list with passages, which are not shelved, so it
     /// takes this with it.
     fn render_new_shelf_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -295,6 +306,10 @@ impl Pedro {
                 .rounded(px(8.))
                 .cursor_pointer()
                 .hover(|this| this.bg(palette::row_hover()))
+                .drag_over::<DraggedShelf>(|this, _, _, _| this.bg(palette::accent().opacity(0.26)))
+                .on_drop(cx.listener(|this, moved: &DraggedShelf, _, cx| {
+                    this.move_shelf(&moved.0, None, cx);
+                }))
                 .child(icon(IconName::FolderOpen, px(14.), palette::text_muted()))
                 .child(
                     div()
@@ -311,7 +326,7 @@ impl Pedro {
                 })
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    this.create_shelf(window, cx);
+                    this.create_shelf(None, window, cx);
                 })),
         )
     }
@@ -389,7 +404,7 @@ impl Pedro {
             let rows: Vec<_> = if expanded {
                 entries
                     .into_iter()
-                    .map(|entry| self.render_entry(entry, cx))
+                    .map(|entry| self.render_entry(entry, section.depth, cx))
                     .collect()
             } else {
                 Vec::new()
@@ -432,22 +447,32 @@ impl Pedro {
             IconName::ChevronRight
         };
 
-        // A shelf header is a thing rather than a grouping: it opens, and a
-        // book dropped on it lands there. The count sits beside the name so an
-        // empty shelf reads as empty rather than as broken.
+        // A shelf header is a thing rather than a grouping: it opens, it takes
+        // a book or another shelf dropped on it, and it can be thrown away. The
+        // count sits beside the name so an empty shelf reads as empty rather
+        // than as broken.
         let shelf = section.shelf.clone();
         let open = shelf.clone();
         let dropped = shelf.clone();
+        let nested = shelf.clone();
+        let dragged = shelf.clone();
+        let name = section.title.clone();
+        // Every level in steps the row, which is the only thing that says what
+        // is standing on what.
+        let step = section.depth.saturating_sub(1) as f32 * STEP;
         // A shelf being asked whether it should go has its own question drawn
         // over this, so the count stands down for as long as that is up.
         let asked = shelf
             .as_ref()
             .map(|shelf| SharedString::from(format!("shelf:{shelf}")))
             .is_some_and(|id| self.is_confirming(&id));
-        let count = shelf
-            .as_ref()
+        // What a question to it would read, rather than how many rows are
+        // under the header: a shelf of shelves has books it answers from and
+        // does not list.
+        let count = section
+            .book_count
             .filter(|_| !asked)
-            .map(|_| SharedString::from(section.entries.len().to_string()));
+            .map(|count| SharedString::from(count.to_string()));
         let tab_id = shelf.as_ref().map(|id| format!("shelf:{id}"));
         let active = tab_id.is_some_and(|id| self.active_tab().is_some_and(|tab| tab.id == id));
 
@@ -459,7 +484,8 @@ impl Pedro {
             // the header is a name that moves while it is being read.
             .relative()
             .h(px(32.))
-            .mx(px(INSET))
+            .ml(px(INSET + step))
+            .mr(px(INSET))
             .px(px(8.))
             .mt(px(10.))
             .gap(px(8.))
@@ -470,14 +496,28 @@ impl Pedro {
             .when(!active, |this| {
                 this.hover(|this| this.bg(palette::row_hover()))
             })
-            // A book being dragged over a shelf lights it, which is the only
-            // thing that says the drop will land rather than be ignored.
+            // A book or a shelf being dragged over a shelf lights it, which is
+            // the only thing that says the drop will land rather than be
+            // ignored.
             .drag_over::<DraggedBook>(|this, _, _, _| this.bg(palette::accent().opacity(0.26)))
+            .drag_over::<DraggedShelf>(|this, _, _, _| this.bg(palette::accent().opacity(0.26)))
             .on_drop(cx.listener(move |this, book: &DraggedBook, _, cx| {
                 if let Some(shelf) = &dropped {
                     this.shelve_book(&book.0, Some(shelf.as_ref()), cx);
                 }
             }))
+            .on_drop(cx.listener(move |this, moved: &DraggedShelf, _, cx| {
+                if let Some(onto) = &nested {
+                    this.move_shelf(&moved.0, Some(onto.as_ref()), cx);
+                }
+            }))
+            // A shelf is dragged the way a book is: onto another shelf to stand
+            // on it, or onto the New shelf row to come back to the top level.
+            .when_some(dragged, |this, id| {
+                this.on_drag(DraggedShelf(id), move |_, _, _, cx| {
+                    cx.new(|_| DragGhost(name.clone()))
+                })
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 // Pressing the header rather than its delete button is an
                 // answer to the question that button asked.
@@ -545,7 +585,63 @@ impl Pedro {
                         this.toggle_section(index, cx);
                     })),
             )
-            .children(shelf.map(|shelf| self.render_shelf_delete_button(&shelf, cx)))
+            .children(
+                shelf.map(|shelf| self.render_shelf_controls(&shelf, section.depth, asked, cx)),
+            )
+    }
+
+    /// What can be done to a shelf from the list: put another shelf inside it,
+    /// or throw it away.
+    ///
+    /// Laid over the count rather than put beside it. A name that shortens the
+    /// moment the pointer crosses the header is a name that moves while it is
+    /// being read, and at three levels in there is not much of it left to move.
+    fn render_shelf_controls(
+        &self,
+        shelf: &SharedString,
+        depth: usize,
+        confirming: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        // The bottom level has nothing to put a shelf on, so it does not offer.
+        // Saying so afterwards, in a notice, would be a button that lies.
+        let room = depth < MAX_SHELF_DEPTH && !confirming;
+
+        h_flex()
+            .absolute()
+            .top(px(6.))
+            .right(px(28.))
+            .gap(px(2.))
+            .items_center()
+            .children(room.then(|| self.render_shelf_add_button(shelf, cx)))
+            .child(self.render_shelf_delete_button(shelf, cx))
+    }
+
+    /// Makes a shelf inside this one.
+    fn render_shelf_add_button(
+        &self,
+        shelf: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let parent = shelf.to_string();
+
+        div()
+            .id(SharedString::from(format!("add-shelf:{shelf}")))
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .invisible()
+            .group_hover(HEADER, |this| this.visible())
+            .bg(palette::surface())
+            .hover(|this| this.bg(palette::row_hover()))
+            .child(icon(IconName::Plus, px(12.), palette::text_muted()))
+            .tooltip(move |window, cx| Tooltip::new("A shelf inside this one").build(window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.create_shelf(Some(parent.clone()), window, cx);
+            }))
     }
 
     /// Throws a shelf away from the list it is in, asking first.
@@ -567,9 +663,6 @@ impl Pedro {
 
         div()
             .id(SharedString::from(format!("delete-shelf:{shelf}")))
-            .absolute()
-            .top(px(6.))
-            .right(px(30.))
             .px(px(7.))
             .h(px(20.))
             .flex()
@@ -602,7 +695,12 @@ impl Pedro {
             }))
     }
 
-    fn render_entry(&self, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_entry(
+        &self,
+        entry: &Entry,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let active = entry.current || self.active_tab().is_some_and(|tab| tab.id == entry.id);
         let clickable = entry.openable;
         let on_open = entry.clone();
@@ -621,7 +719,8 @@ impl Pedro {
             .id(entry.id.clone())
             .group(GROUP)
             .relative()
-            .mx(px(INSET))
+            .ml(px(INSET + depth.saturating_sub(1) as f32 * STEP))
+            .mr(px(INSET))
             .mt(px(2.))
             .rounded(px(10.))
             .bg(if active {
@@ -735,7 +834,7 @@ impl Pedro {
 
                 self.render_menu_item(
                     SharedString::from(format!("shelf-menu:{}", shelf.id)),
-                    shelf.name.clone().into(),
+                    self.library.path_of(&shelf.id),
                     here,
                     cx.listener(
                         move |this: &mut Pedro,
@@ -786,7 +885,7 @@ impl Pedro {
                          window: &mut Window,
                          cx: &mut Context<Pedro>| {
                             cx.stop_propagation();
-                            this.create_shelf(window, cx);
+                            this.create_shelf(None, window, cx);
                             this.close_shelf_menu(cx);
                         },
                     ),
@@ -1037,6 +1136,10 @@ fn status_color(status: Status) -> Hsla {
 /// A book on its way to a shelf.
 #[derive(Clone)]
 pub(crate) struct DraggedBook(pub SharedString);
+
+/// A shelf on its way onto another one, or back to the top level.
+#[derive(Clone)]
+pub(crate) struct DraggedShelf(pub SharedString);
 
 /// What follows the pointer while a book is being dragged.
 struct DragGhost(SharedString);

@@ -196,7 +196,7 @@ fn prepare_shelf(store: &Store, question: &Question, folder_id: &str) -> Result<
         .folder(folder_id)?
         .ok_or_else(|| ChatError::NoSuchFolder(folder_id.to_owned()))?;
 
-    let books = store.books_in(&folder.id)?;
+    let books = store.books_under(&folder.id)?;
     if books.is_empty() {
         return Err(ChatError::EmptyShelf);
     }
@@ -221,8 +221,8 @@ fn prepare_shelf(store: &Store, question: &Question, folder_id: &str) -> Result<
 
     let system = build_shelf_prompt(&folder.name, &retrieved, question.web_search);
 
-    // Every book on the shelf, because a source is looked up by its quotation
-    // and the quotation does not say which book it came from.
+    // Every book under the shelf, because a source is looked up by its
+    // quotation and the quotation does not say which book it came from.
     let mut cited = Vec::with_capacity(books.len());
     for book in books {
         cited.push(Cited {
