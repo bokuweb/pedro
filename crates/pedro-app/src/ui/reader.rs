@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, RenderImage, SharedString, StatefulInteractiveElement as _,
-    Styled as _, canvas, div, img, px, relative, uniform_list,
+    AnyElement, Context, Div, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, canvas, div, img, px, relative, uniform_list,
 };
 use gpui_component::input::Input;
 use gpui_component::{IconName, Sizable as _, h_flex, spinner::Spinner, v_flex};
@@ -273,6 +273,7 @@ impl Pedro {
                     height,
                     held.image.clone(),
                     marks,
+                    open.spotlight_rects(page).to_vec(),
                     open.selection_rects(page),
                 )
                 .into_any_element()
@@ -347,6 +348,7 @@ fn render_sheet(
     height: f32,
     image: Arc<RenderImage>,
     marks: Vec<Rect>,
+    spotlight: Vec<Rect>,
     selection: Vec<Rect>,
 ) -> impl IntoElement {
     div()
@@ -363,6 +365,7 @@ fn render_sheet(
                 .into_iter()
                 .map(|rect| render_over_page(rect, palette::working().opacity(0.26))),
         )
+        .children(spotlight.into_iter().map(render_spotlight))
         .children(
             selection
                 .into_iter()
@@ -375,7 +378,7 @@ fn render_sheet(
 /// Placed in fractions of the sheet rather than in pixels, which is the same
 /// space the character boxes are measured in — so a mark stays on its words at
 /// any size the page is drawn.
-fn render_over_page(rect: Rect, tint: Hsla) -> impl IntoElement {
+fn render_over_page(rect: Rect, tint: Hsla) -> Div {
     div()
         .absolute()
         .left(relative(rect.left))
@@ -384,6 +387,18 @@ fn render_over_page(rect: Rect, tint: Hsla) -> impl IntoElement {
         .h(relative(rect.height().max(0.0)))
         .rounded(px(2.))
         .bg(tint)
+}
+
+/// The passage a jump was aimed at.
+///
+/// Drawn over whatever else is on those lines — a mark reached from the panel
+/// is both — and outlined rather than only tinted: a second wash of colour over
+/// a mark is a slightly different pink, while a line around it is unmistakably
+/// *this one*.
+fn render_spotlight(rect: Rect) -> impl IntoElement {
+    render_over_page(rect, palette::accent().opacity(0.28))
+        .border_1()
+        .border_color(palette::accent())
 }
 
 /// A page whose image has not arrived yet.

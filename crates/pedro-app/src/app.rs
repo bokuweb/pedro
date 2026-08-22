@@ -24,7 +24,7 @@ use pedro_core::store::Store;
 use pedro_pdf::{Document, PageSize};
 
 use crate::chat::Conversation;
-use crate::document::{OpenDocument, Page, as_render_image};
+use crate::document::{OpenDocument, Page, Spotlight, as_render_image};
 use crate::library::{Library, SharedStore};
 use crate::palette;
 use crate::panes::Pane;
@@ -141,9 +141,10 @@ pub struct Pedro {
     /// any more.
     pub(crate) hits: Vec<pedro_search::Hit>,
     pub(crate) searched_for: String,
-    /// The page a book being opened should land on, when it was opened by
-    /// something that knows where it wants to go.
-    turn_to_when_open: Option<u32>,
+    /// The passage a book being opened should land on, when it was opened by
+    /// something that knows where it wants to go — a search hit, which names a
+    /// page and the words that were found on it.
+    open_at: Option<Spotlight>,
     /// The last thing that went wrong where the reader was looking. Shown in
     /// the sidebar rather than as a notification: a file that could not be
     /// added is about the list it is missing from.
@@ -250,7 +251,7 @@ impl Pedro {
             attached: Vec::new(),
             hits: Vec::new(),
             searched_for: String::new(),
-            turn_to_when_open: None,
+            open_at: None,
             notice: None,
             window_drag_armed: false,
             drive,
@@ -874,10 +875,23 @@ impl Pedro {
         }
 
         if let Some(hit) = entry.id.strip_prefix("hit:") {
-            if let Some((book_id, page)) = hit.rsplit_once(':')
+            // `hit:{index}:{book}:{page}` (see `Panel::found`). The place is
+            // read out of the row's own name so that it is right whatever the
+            // search has done since; the index is only how the passage itself
+            // is fetched back, and is checked against the place before it is
+            // believed.
+            if let Some((index, rest)) = hit.split_once(':')
+                && let Some((book_id, page)) = rest.rsplit_once(':')
                 && let Ok(page) = page.parse::<u32>()
             {
-                self.open_found(book_id, page, cx);
+                let passage = index
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| self.hits.get(index))
+                    .filter(|hit| hit.book_id == book_id && hit.page_number == page)
+                    .map(|hit| hit.text.clone());
+
+                self.open_found(book_id, page, passage, cx);
             }
             return;
         }
@@ -985,9 +999,15 @@ impl Pedro {
                 tab.document = Some(open);
 
                 // Where it was asked to go, or where the reader left off.
-                let page = self.turn_to_when_open.take().unwrap_or(page);
+                let target = self.open_at.take();
+                let page = target.as_ref().map_or(page, |target| target.page);
                 if let Some(open) = &mut tab.document {
                     open.page = page.clamp(1, open.page_count.max(1));
+                    // Pointed at now, found later: the page it is on is several
+                    // trips through pdfium away.
+                    if let Some(target) = target {
+                        open.spotlight(target);
+                    }
                 }
 
                 // The list holds the position now, so continuing where the
@@ -1162,6 +1182,11 @@ impl Pedro {
         };
         tracing::debug!(page, x, y, "press");
 
+        // A reader touching the page has found what they were sent to.
+        if let Some(open) = self.document_mut() {
+            open.clear_spotlight();
+        }
+
         // A passage already marked is a conversation, not a place to start a
         // new selection: pressing on one reopens what was said about it.
         if let Some(highlight) = self
@@ -1333,8 +1358,16 @@ impl Pedro {
             .detach();
     }
 
-    /// Opens the book a search hit is in, at the page it is on.
-    pub(crate) fn open_found(&mut self, book_id: &str, page: u32, cx: &mut Context<Self>) {
+    /// Opens the book a search hit is in, at the page it is on, and points at
+    /// the passage when the caller knows which one it was. A citation arrives
+    /// here knowing only the page, and lands on it with nothing lit.
+    pub(crate) fn open_found(
+        &mut self,
+        book_id: &str,
+        page: u32,
+        passage: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(book) = self
             .library
             .books()
@@ -1349,12 +1382,18 @@ impl Pedro {
         let already_open = self.tabs.iter().any(|tab| tab.id == tab_id);
         self.open_entry(&Entry::opening(tab_id, crate::library::title_of(&book)), cx);
 
+        let target = passage.map_or_else(
+            || Spotlight::page(page),
+            |passage| Spotlight::found(page, passage),
+        );
+
         // A book that had to be read first turns to the page when it lands;
         // one that was already open can turn now.
         if already_open {
             self.show_page(page, cx);
+            self.point_at(target, cx);
         } else {
-            self.turn_to_when_open = Some(page);
+            self.open_at = Some(target);
         }
     }
 
@@ -1373,6 +1412,10 @@ impl Pedro {
         };
 
         self.show_page(highlight.page_number, cx);
+        self.point_at(
+            Spotlight::marked(highlight.page_number, highlight.rects.clone()),
+            cx,
+        );
         self.open_highlight(&highlight, cx);
         self.show_chat(true, cx);
     }
@@ -2123,6 +2166,16 @@ impl Pedro {
 
         let by = page as i64 - open.page as i64;
         self.turn_page(by, cx);
+    }
+
+    /// Points at the passage a jump was aimed at, so the reader lands on the
+    /// sentence rather than on the page it is somewhere on.
+    fn point_at(&mut self, target: Spotlight, cx: &mut Context<Self>) {
+        if let Some(open) = self.document_mut() {
+            open.spotlight(target);
+        }
+
+        cx.notify();
     }
 
     /// Keeps the composer's prompt on the same subject as the tab.

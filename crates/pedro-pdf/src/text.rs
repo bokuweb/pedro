@@ -100,6 +100,40 @@ impl PageText {
             .collect()
     }
 
+    /// Where `needle` sits on this page, as the first and last character it
+    /// covers.
+    ///
+    /// A passage a search returns was cut out of this very string, so the first
+    /// look is for the whole of it. The shortening afterwards is for the case
+    /// where it was not: a book indexed by an older pedro, or a quotation that
+    /// has been tidied since. An opening that is still a phrase points at the
+    /// right paragraph even when the rest of it has drifted; anything shorter
+    /// would start matching words that happen to appear elsewhere, and a
+    /// spotlight on the wrong sentence is worse than none.
+    pub fn locate(&self, needle: &str) -> Option<(usize, usize)> {
+        /// The shortest opening worth looking for, in characters.
+        const SHORTEST: usize = 24;
+
+        let characters: Vec<char> = needle.trim().chars().collect();
+        if characters.is_empty() {
+            return None;
+        }
+
+        let mut length = characters.len();
+        loop {
+            let opening: String = characters[..length].iter().collect();
+            if let Some(byte) = self.text.find(&opening) {
+                let from = self.text[..byte].chars().count();
+                return Some((from, from + length - 1));
+            }
+
+            if length <= SHORTEST {
+                return None;
+            }
+            length = (length / 2).max(SHORTEST);
+        }
+    }
+
     /// The character whose box holds `(x, y)`, in normalised page coordinates.
     pub fn char_at(&self, x: f32, y: f32) -> Option<usize> {
         self.chars
@@ -221,6 +255,39 @@ mod tests {
     fn a_slice_counts_characters_not_bytes() {
         let page = page("あいうえお", vec![]);
         assert_eq!(page.slice(1, 2), "いう");
+    }
+
+    #[test]
+    fn a_passage_is_found_where_it_sits() {
+        let page = page("one two three", vec![]);
+        assert_eq!(page.locate("two"), Some((4, 6)));
+    }
+
+    #[test]
+    fn a_passage_is_located_in_characters_not_bytes() {
+        let page = page("あいうえお", vec![]);
+        assert_eq!(page.locate("うえ"), Some((2, 3)));
+    }
+
+    /// A quotation whose tail has drifted still points at the paragraph it
+    /// opens, as long as the opening is a phrase rather than a word.
+    #[test]
+    fn a_passage_that_only_starts_the_same_is_found_by_its_opening() {
+        let page = page("the quick brown fox jumps over the lazy dog", vec![]);
+        let drifted = "the quick brown fox jumps over the sleepy cat, and then some";
+
+        let (from, to) = page.locate(drifted).expect("the opening it shares");
+        assert_eq!(page.slice(from, to), "the quick brown fox jumps over");
+    }
+
+    #[test]
+    fn a_passage_that_is_not_here_is_not_found() {
+        let page = page("one two three", vec![]);
+        assert_eq!(
+            page.locate("nothing of the sort, at any length at all"),
+            None
+        );
+        assert_eq!(page.locate(""), None);
     }
 
     #[test]

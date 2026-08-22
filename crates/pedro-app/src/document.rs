@@ -61,6 +61,52 @@ pub struct Selection {
     pub to: usize,
 }
 
+/// The passage a jump was aimed at, drawn until the reader looks elsewhere.
+///
+/// A jump that only scrolls leaves the reader to find the sentence again on the
+/// page it is on, which for a search hit is the search a second time. What is
+/// known of the passage depends on where the jump came from: a mark carries the
+/// rectangles it was drawn from, while a search hit carries only the words it
+/// matched — and words become rectangles only once the page has been read.
+#[derive(Debug, Clone)]
+pub struct Spotlight {
+    pub page: u32,
+    /// The passage as text, for a target that arrived as words.
+    pub needle: Option<String>,
+    /// One rectangle per line of it, once they are known.
+    pub rects: Vec<Rect>,
+}
+
+impl Spotlight {
+    /// A page to land on with nothing on it to point at, which is all a jump
+    /// knows when the passage it was made from has gone.
+    pub fn page(page: u32) -> Self {
+        Self {
+            page,
+            needle: None,
+            rects: Vec::new(),
+        }
+    }
+
+    /// A passage whose geometry is already known, the way a mark's is.
+    pub fn marked(page: u32, rects: Vec<Rect>) -> Self {
+        Self {
+            page,
+            needle: None,
+            rects,
+        }
+    }
+
+    /// A passage known only by its words, the way a search hit is.
+    pub fn found(page: u32, needle: impl Into<String>) -> Self {
+        Self {
+            page,
+            needle: Some(needle.into()),
+            rects: Vec::new(),
+        }
+    }
+}
+
 /// A book open in a tab.
 pub struct OpenDocument {
     /// Shared with the background thread that rasterises pages.
@@ -85,6 +131,9 @@ pub struct OpenDocument {
     /// Every passage marked in this book, so the ones on a page can be drawn and
     /// the conversation behind one can be reopened by pressing it.
     pub highlights: Vec<Highlight>,
+    /// Where the reader was last sent from the panel, so the page can point at
+    /// the passage rather than merely arrive at it.
+    pub spotlight: Option<Spotlight>,
 }
 
 impl OpenDocument {
@@ -101,6 +150,7 @@ impl OpenDocument {
             generation: 0,
             selection: None,
             highlights: Vec::new(),
+            spotlight: None,
         }
     }
 
@@ -133,6 +183,10 @@ impl OpenDocument {
 
         let here = self.page;
         self.pages.retain(|number, _| number.abs_diff(here) <= KEEP);
+
+        // A jump lands long before the page it aimed at, so the passage is
+        // looked for here rather than where the jump was made.
+        self.find_spotlight();
     }
 
     /// How wide `page` is when drawn `height` logical pixels tall: its own
@@ -231,6 +285,57 @@ impl OpenDocument {
                 None => Vec::new(),
             },
             None => Vec::new(),
+        }
+    }
+
+    /// Points at a passage, and finds it if the page it is on has been read.
+    pub fn spotlight(&mut self, spotlight: Spotlight) {
+        self.spotlight = Some(spotlight);
+        self.find_spotlight();
+    }
+
+    /// Stops pointing at anything. The reader touching the page is a reader who
+    /// has found what they were sent to, and the pointer has outstayed it.
+    pub fn clear_spotlight(&mut self) {
+        self.spotlight = None;
+    }
+
+    /// Turns a spotlight known only by its words into rectangles.
+    ///
+    /// A passage that is not on the page it claims puts the spotlight out
+    /// rather than leaving it looking again at every page that lands: the page
+    /// has been read, so the answer will not change.
+    fn find_spotlight(&mut self) {
+        let Some(spotlight) = &self.spotlight else {
+            return;
+        };
+        let Some(needle) = spotlight
+            .needle
+            .as_deref()
+            .filter(|_| spotlight.rects.is_empty())
+        else {
+            return;
+        };
+        let Some(held) = self.pages.get(&spotlight.page) else {
+            return;
+        };
+
+        match held.text.locate(needle) {
+            Some((from, to)) => {
+                let rects = held.text.line_rects(from, to);
+                if let Some(spotlight) = &mut self.spotlight {
+                    spotlight.rects = rects;
+                }
+            }
+            None => self.spotlight = None,
+        }
+    }
+
+    /// The lines to point at on `page`, if that is where the reader was sent.
+    pub fn spotlight_rects(&self, page: u32) -> &[Rect] {
+        match &self.spotlight {
+            Some(spotlight) if spotlight.page == page => &spotlight.rects,
+            _ => &[],
         }
     }
 

@@ -474,7 +474,7 @@ fn render_citation(citation: Citation, cx: &mut Context<Pedro>) -> impl IntoElem
             this.on_click(cx.listener(move |this, _, _, cx| match &from {
                 // The book is named when the answer came from a shelf, and the
                 // page is a page of that book rather than of whatever is open.
-                Some(book) => this.open_found(&book.id, page, cx),
+                Some(book) => this.open_found(&book.id, page, None, cx),
                 None => this.show_page(page, cx),
             }))
         })
