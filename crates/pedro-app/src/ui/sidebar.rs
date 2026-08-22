@@ -57,6 +57,7 @@ impl Pedro {
                 .border_color(palette::border())
                 .child(self.render_window_row(window, cx))
                 .child(self.render_navigation(cx))
+                .children(self.render_drive_field())
                 .child(self.render_search())
                 .children(self.render_notice())
                 .child(self.render_sections(cx))
@@ -86,6 +87,7 @@ impl Pedro {
             .gap(px(2.))
             .items_center()
             .child(self.render_add_button(cx))
+            .child(self.render_drive_button(cx))
             .child(
                 div()
                     .id("panel-hint")
@@ -236,6 +238,51 @@ impl Pedro {
                 cx.stop_propagation();
                 this.pick_documents(cx);
             }))
+    }
+
+    /// The other way a book gets in: out of Drive rather than off the disk.
+    fn render_drive_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("panel-drive")
+            .size(px(24.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            // Held open while the field below it is, so the button reads as the
+            // thing that opened it rather than as one that did nothing.
+            .when(self.drive_open, |this| this.bg(palette::row_hover()))
+            .hover(|this| this.bg(palette::row_hover()))
+            .child(icon(IconName::ExternalLink, px(14.), palette::text_muted()))
+            .tooltip(move |window, cx| Tooltip::new("Add from Google Drive").build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.toggle_drive(window, cx);
+            }))
+    }
+
+    /// Where a Drive link is pasted, when that has been asked for.
+    fn render_drive_field(&self) -> Option<impl IntoElement + use<>> {
+        if !self.drive_open {
+            return None;
+        }
+
+        Some(
+            div().px(px(INSET)).pb(px(6.)).child(
+                Input::new(&self.drive)
+                    .h(px(34.))
+                    .prefix(icon(IconName::ExternalLink, px(15.), palette::text_faint()))
+                    .suffix(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::text_faint())
+                            .child(match self.drive_busy {
+                                true => "…",
+                                false => "⏎",
+                            }),
+                    ),
+            ),
+        )
     }
 
     fn render_search(&self) -> impl IntoElement + use<> {

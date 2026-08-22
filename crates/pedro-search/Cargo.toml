@@ -1,0 +1,19 @@
+[package]
+name = "pedro-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Full-text and similarity search over the books in the library."
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+rusqlite = { version = "0.40", features = ["bundled", "load_extension"] }
+sqlite-vec = "0.1"
+bytemuck = "1"
+memmap2 = "0.9"
+safetensors = "0.4"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+uuid = { version = "1", features = ["v4"] }

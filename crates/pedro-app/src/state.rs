@@ -229,6 +229,42 @@ impl Panel {
         }
     }
 
+    /// What a search across every book found.
+    ///
+    /// Shown in place of the library while there is something in the search
+    /// box: a reader who has typed a query is looking for a passage, not for a
+    /// book whose title happens to contain what they typed.
+    fn found(hits: &[pedro_search::Hit], library: &Library, query: &str) -> Self {
+        let titles: std::collections::HashMap<&str, SharedString> = library
+            .books()
+            .iter()
+            .map(|book| (book.id.as_str(), title_of(book)))
+            .collect();
+
+        let entries = hits
+            .iter()
+            .map(|hit| {
+                let book = titles
+                    .get(hit.book_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| "a book".into());
+
+                Entry::new(
+                    format!("hit:{}:{}", hit.book_id, hit.page_number),
+                    one_line(&hit.text),
+                )
+                .icon(IconName::Search)
+                .meta(book)
+                .trailing(format!("p. {}", hit.page_number))
+            })
+            .collect();
+
+        Self::new(
+            vec![Section::new("Passages", entries)],
+            format!("Nothing in your books matches “{query}”."),
+        )
+    }
+
     /// The books on disk, split by whether the reader has been into them.
     ///
     /// Two sections rather than one because "where was I" and "what did I add"
@@ -400,6 +436,9 @@ impl Panel {
 
     pub fn for_rail_item(item: RailItem, shown: &Shown<'_>) -> Self {
         match item {
+            RailItem::Library if !shown.query.is_empty() => {
+                Self::found(shown.hits, shown.library, shown.query)
+            }
             RailItem::Library => Self::library(shown.library),
             RailItem::Reader => Self::reader(shown.outline, shown.page),
             RailItem::Highlights => Self::highlights(shown.highlights, shown.chat),
@@ -425,6 +464,9 @@ pub struct Shown<'a> {
     pub library_path: Option<&'a std::path::Path>,
     /// How large a page is drawn, as a multiple of its natural size.
     pub zoom: f32,
+    /// What the reader is searching for, and what that found.
+    pub query: &'a str,
+    pub hits: &'a [pedro_search::Hit],
 }
 
 /// A passage as one line, for a list that has room for one.

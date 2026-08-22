@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("asking {}", agent.kind.display_name());
 
-    let store = Store::open_default()?;
+    let mut store = Store::open_default()?;
     let book = store.add_document(&path)?;
     println!(
         "{} — {} pages, {} chapters",

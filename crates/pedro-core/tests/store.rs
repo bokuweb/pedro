@@ -43,7 +43,7 @@ fn highlight_of(text: &str, page: u32) -> NewHighlight {
 
 #[test]
 fn adding_a_document_reads_its_pages_and_its_text() {
-    let (store, root) = library("adds");
+    let (mut store, root) = library("adds");
     let source = pdf(&root, "book.pdf", &["first", "second"]);
 
     let book = store.add_document(&source).expect("a readable pdf");
@@ -60,7 +60,7 @@ fn adding_a_document_reads_its_pages_and_its_text() {
 
 #[test]
 fn the_bytes_are_copied_into_the_library() {
-    let (store, root) = library("copies");
+    let (mut store, root) = library("copies");
     let source = pdf(&root, "book.pdf", &["only"]);
 
     let book = store.add_document(&source).expect("a readable pdf");
@@ -74,7 +74,7 @@ fn the_bytes_are_copied_into_the_library() {
 /// re-adding a book keeps everything the reader built on it.
 #[test]
 fn re_adding_the_same_book_keeps_its_highlights_and_its_place() {
-    let (store, root) = library("re-adds");
+    let (mut store, root) = library("re-adds");
     let source = pdf(&root, "book.pdf", &["first", "second"]);
 
     let book = store.add_document(&source).expect("a readable pdf");
@@ -105,7 +105,7 @@ fn re_adding_the_same_book_keeps_its_highlights_and_its_place() {
 
 #[test]
 fn books_are_listed_most_recently_touched_first() {
-    let (store, root) = library("orders");
+    let (mut store, root) = library("orders");
 
     let first = store
         .add_document(&pdf(&root, "first.pdf", &["a"]))
@@ -126,7 +126,7 @@ fn books_are_listed_most_recently_touched_first() {
 
 #[test]
 fn removing_a_book_takes_its_highlights_conversations_and_bytes() {
-    let (store, root) = library("removes");
+    let (mut store, root) = library("removes");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a"]))
         .expect("a readable pdf");
@@ -157,7 +157,7 @@ fn removing_a_book_that_is_not_there_says_so() {
 
 #[test]
 fn a_place_is_saved_and_read_back() {
-    let (store, root) = library("place");
+    let (mut store, root) = library("place");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a", "b", "c"]))
         .expect("a readable pdf");
@@ -194,7 +194,7 @@ fn a_place_is_saved_and_read_back() {
 /// unsaid keeps whatever was stored.
 #[test]
 fn saving_a_page_leaves_panels_nobody_mentioned_alone() {
-    let (store, root) = library("panels");
+    let (mut store, root) = library("panels");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a", "b"]))
         .expect("a readable pdf");
@@ -235,7 +235,7 @@ fn saving_a_page_leaves_panels_nobody_mentioned_alone() {
 
 #[test]
 fn a_highlight_keeps_its_geometry() {
-    let (store, root) = library("highlights");
+    let (mut store, root) = library("highlights");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a"]))
         .expect("a readable pdf");
@@ -261,7 +261,7 @@ fn a_highlight_on_a_book_that_is_not_there_says_so() {
 
 #[test]
 fn a_conversation_is_stored_in_the_order_it_happened() {
-    let (store, root) = library("conversation");
+    let (mut store, root) = library("conversation");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a"]))
         .expect("a readable pdf");
@@ -313,7 +313,7 @@ fn a_message_on_a_highlight_that_is_not_there_says_so() {
 /// is still worth showing in the list.
 #[test]
 fn a_broken_geometry_column_still_yields_the_highlight() {
-    let (store, root) = library("broken-json");
+    let (mut store, root) = library("broken-json");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a"]))
         .expect("a readable pdf");
@@ -338,7 +338,7 @@ fn a_broken_geometry_column_still_yields_the_highlight() {
 
 #[test]
 fn a_file_that_is_not_a_pdf_is_refused_and_leaves_nothing_behind() {
-    let (store, root) = library("not-a-pdf");
+    let (mut store, root) = library("not-a-pdf");
     let source = root.join("notes.pdf");
     std::fs::write(&source, b"this is not a pdf").expect("a writable file");
 
@@ -353,7 +353,7 @@ fn a_file_that_is_not_a_pdf_is_refused_and_leaves_nothing_behind() {
 
 #[test]
 fn a_library_reopens_with_what_was_put_in_it() {
-    let (store, root) = library("reopen");
+    let (mut store, root) = library("reopen");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a"]))
         .expect("a readable pdf");
@@ -371,7 +371,7 @@ fn a_library_reopens_with_what_was_put_in_it() {
 /// the fix has to survive the window being closed.
 #[test]
 fn an_outline_can_be_filled_in_later() {
-    let (store, root) = library("outline");
+    let (mut store, root) = library("outline");
     let book = store
         .add_document(&pdf(&root, "book.pdf", &["a", "b", "c"]))
         .expect("a readable pdf");
@@ -404,4 +404,52 @@ fn an_outline_for_a_book_that_is_not_there_says_so() {
 
     let error = store.set_outline("nope", &[]).unwrap_err();
     assert!(matches!(error, StoreError::NoSuchBook(_)), "{error}");
+}
+
+/// Adding a book makes it searchable, without opening it.
+#[test]
+fn a_new_book_can_be_searched_at_once() {
+    let (mut store, root) = library("search");
+    let book = store
+        .add_document(&pdf(
+            &root,
+            "book.pdf",
+            &["preface", "the runtime runs at the edge"],
+        ))
+        .expect("a readable pdf");
+
+    let hits = store.search("runtime").expect("a search");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].book_id, book.id);
+    assert_eq!(hits[0].page_number, 2);
+}
+
+#[test]
+fn removing_a_book_removes_what_was_indexed_from_it() {
+    let (mut store, root) = library("search-removed");
+    let book = store
+        .add_document(&pdf(&root, "book.pdf", &["the runtime"]))
+        .expect("a readable pdf");
+
+    store.remove_book(&book.id).expect("a stored book");
+
+    assert!(store.search("runtime").expect("a search").is_empty());
+}
+
+/// Books added before there was an index have to get one.
+#[test]
+fn books_stored_without_an_index_are_indexed_later() {
+    let (mut store, root) = library("search-backfill");
+    let book = store
+        .add_document(&pdf(&root, "book.pdf", &["the runtime"]))
+        .expect("a readable pdf");
+
+    // As though it had been added by a pedro that could not search.
+    pedro_search::index::forget_for_test(store.connection(), &book.id).expect("forgotten");
+    assert!(store.search("runtime").expect("a search").is_empty());
+
+    assert_eq!(store.index_missing().expect("a backfill"), 1);
+    assert_eq!(store.search("runtime").expect("a search").len(), 1);
+    assert_eq!(store.index_missing().expect("a second backfill"), 0);
 }

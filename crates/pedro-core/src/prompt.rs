@@ -29,6 +29,13 @@ pub fn build_conversation(history: &[Turn], question: &str) -> Vec<Turn> {
         .collect()
 }
 
+/// A passage the search found for the question, and the page it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retrieved {
+    pub page: u32,
+    pub text: String,
+}
+
 /// A passage the reader marked, and the page it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passage {
@@ -47,6 +54,7 @@ pub struct Passage {
 pub fn build_system_prompt(
     excerpts: &[Excerpt],
     passages: &[Passage],
+    retrieved: &[Retrieved],
     use_web_search: bool,
 ) -> String {
     let total_pages = excerpts.first().map_or(1, |excerpt| excerpt.total_pages);
@@ -86,6 +94,7 @@ pub fn build_system_prompt(
 
     let excerpt_or_document = if is_partial { "excerpt" } else { "document" };
     let marked = mark_up(passages);
+    let found = found_elsewhere(retrieved);
     let web_search_instruction = if use_web_search {
         format!(
             "\n\nWhen {scope_does} not contain enough information to answer the question, you may \
@@ -110,7 +119,7 @@ Use the following {context_name} as your primary context:
 {text}
 --- DOCUMENT END ---
 
-{marked}
+{marked}{found}
 
 Instructions:
 - Answer questions based primarily on the document content.
@@ -137,6 +146,34 @@ Service bindings connect two Workers directly[3].
 [1] "Workers execute on Cloudflare's global network across 300+ cities"
 [2] 「public、privateはキャッシュを共有キャッシュとして扱ってよいかの指定に使います」
 [3] "you can deploy an authentication service as its own Worker" - Service bindings · Cloudflare Workers docs - https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/"###
+    )
+}
+
+/// The passages a search turned up for the question, from parts of the book
+/// the excerpt does not cover.
+///
+/// Verbatim, like everything else between markers: a passage quoted back out of
+/// this is still a passage of the book, so the citation lookup finds the page
+/// it came from.
+fn found_elsewhere(retrieved: &[Retrieved]) -> String {
+    if retrieved.is_empty() {
+        return String::new();
+    }
+
+    let blocks: String = retrieved
+        .iter()
+        .map(|passage| {
+            format!(
+                "--- RELATED PASSAGE (page {}) ---\n{}\n",
+                passage.page, passage.text
+            )
+        })
+        .collect();
+
+    format!(
+        "\nSearching the rest of the document for this question turned up these \
+         passages. They are from elsewhere in it, so say which page a claim \
+         comes from when you use one:\n{blocks}--- END RELATED PASSAGES ---\n"
     )
 }
 
@@ -227,6 +264,10 @@ mod tests {
         assert_eq!(build_conversation(&[], "質問"), vec![Turn::user("質問")]);
     }
 
+    fn nothing_found() -> Vec<Retrieved> {
+        Vec::new()
+    }
+
     fn one(passage: &str) -> Vec<Passage> {
         vec![Passage {
             page: 5,
@@ -236,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_partial_excerpt_names_the_pages_it_shows() {
-        let prompt = build_system_prompt(&[excerpt(true)], &one("一節"), false);
+        let prompt = build_system_prompt(&[excerpt(true)], &one("一節"), &nothing_found(), false);
 
         assert!(prompt.contains("excerpt (pages 5-8 of the 12-page document)"));
         assert!(prompt.contains("You are shown only pages 5-8"));
@@ -245,7 +286,7 @@ mod tests {
     /// A one-page book is never told it is looking at a fragment.
     #[test]
     fn a_whole_excerpt_is_called_the_document() {
-        let prompt = build_system_prompt(&[excerpt(false)], &one("一節"), false);
+        let prompt = build_system_prompt(&[excerpt(false)], &one("一節"), &nothing_found(), false);
 
         assert!(prompt.contains("Use the following document as your primary context"));
         assert!(!prompt.contains("excerpt"));
@@ -254,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_passage_and_the_text_travel_in_their_own_blocks() {
-        let prompt = build_system_prompt(&[excerpt(true)], &one("選んだ一節"), false);
+        let prompt = build_system_prompt(&[excerpt(true)], &one("選んだ一節"), &nothing_found(), false);
 
         let document = prompt
             .split("--- DOCUMENT START ---")
@@ -269,11 +310,11 @@ mod tests {
     #[test]
     fn web_search_is_offered_only_when_it_is_on() {
         assert!(
-            build_system_prompt(&[excerpt(true)], &one("一節"), true)
+            build_system_prompt(&[excerpt(true)], &one("一節"), &nothing_found(), true)
                 .contains("you may use web search")
         );
         assert!(
-            build_system_prompt(&[excerpt(true)], &one("一節"), false)
+            build_system_prompt(&[excerpt(true)], &one("一節"), &nothing_found(), false)
                 .contains("Respond using only the excerpt context")
         );
     }

@@ -122,19 +122,43 @@ pub struct Pedro {
     /// square with that" is the reason to have a reader that can be asked
     /// anything — so marking a passage adds to this rather than replacing it.
     pub(crate) attached: Vec<NewHighlight>,
+    /// What a search across the books found, and what it was looking for.
+    ///
+    /// The query is kept beside the hits because a result that arrives after
+    /// the reader has typed more is a result for a question nobody is asking
+    /// any more.
+    pub(crate) hits: Vec<pedro_search::Hit>,
+    pub(crate) searched_for: String,
+    /// The page a book being opened should land on, when it was opened by
+    /// something that knows where it wants to go.
+    turn_to_when_open: Option<u32>,
     /// The last thing that went wrong where the reader was looking. Shown in
     /// the sidebar rather than as a notification: a file that could not be
     /// added is about the list it is missing from.
     pub(crate) notice: Option<SharedString>,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
+    /// Where a Google Drive link is pasted, and whether that row is showing.
+    ///
+    /// Hidden until it is asked for: most books come off the disk, and a field
+    /// for the ones that do not should not cost a row of the panel to every
+    /// reader who never uses it.
+    pub(crate) drive: Entity<InputState>,
+    pub(crate) drive_open: bool,
+    /// Whether a fetch is in flight. One at a time: the first thing a fetch
+    /// may do is open a browser, and two of those at once is not a sign-in.
+    pub(crate) drive_busy: bool,
 }
 
 impl Pedro {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        // Re-render as the query changes so the sidebar filter stays live.
-        cx.observe(&search, |_, _, cx| cx.notify()).detach();
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search your books"));
+        // Re-render as the query changes, and go and look for it.
+        cx.observe(&search, |this: &mut Self, _, cx| {
+            this.search_books(cx);
+            cx.notify();
+        })
+        .detach();
 
         // Grows with the question rather than scrolling inside two lines: a
         // passage quoted back at the agent is easily a paragraph.
@@ -149,6 +173,16 @@ impl Pedro {
             // tells it apart from the shift-enter that only breaks the line.
             if matches!(event, InputEvent::PressEnter { secondary: true }) {
                 this.ask(window, cx);
+            }
+        })
+        .detach();
+
+        let drive = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Paste a Google Drive link and press ⏎")
+        });
+        cx.subscribe_in(&drive, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.add_from_drive(window, cx);
             }
         })
         .detach();
@@ -180,8 +214,14 @@ impl Pedro {
             page_bounds: Rc::new(RefCell::new(HashMap::new())),
             selecting: false,
             attached: Vec::new(),
+            hits: Vec::new(),
+            searched_for: String::new(),
+            turn_to_when_open: None,
             notice: None,
             window_drag_armed: false,
+            drive,
+            drive_open: false,
+            drive_busy: false,
         }
     }
 
@@ -248,7 +288,29 @@ impl Pedro {
         };
 
         self.reopen_last_book(cx);
+        self.index_missing_books(cx);
         cx.notify();
+    }
+
+    /// Indexes the books that were added before there was an index.
+    ///
+    /// After the library is handed over rather than before it, so that the
+    /// shelf is on screen while this happens: a book of five hundred pages is
+    /// a few thousand passages to cut and write.
+    fn index_missing_books(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        cx.background_executor()
+            .spawn(async move {
+                match store.lock().index_missing() {
+                    Ok(0) => {}
+                    Ok(done) => tracing::info!(books = done, "indexed books added earlier"),
+                    Err(err) => tracing::warn!(?err, "could not index the older books"),
+                }
+            })
+            .detach();
     }
 
     /// Opens the book the reader was last in.
@@ -316,7 +378,7 @@ impl Pedro {
             let added = cx
                 .background_executor()
                 .spawn(async move {
-                    let store = store.lock();
+                    let mut store = store.lock();
                     // One bad file does not cost the reader the others: it is
                     // reported, and the rest are still added.
                     let mut failures = Vec::new();
@@ -335,6 +397,92 @@ impl Pedro {
 
             this.update(cx, |this, cx| this.documents_added(added, cx))
                 .ok();
+        })
+        .detach();
+    }
+
+    /// Shows or hides the row a Google Drive link is pasted into.
+    pub(crate) fn toggle_drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drive_open = !self.drive_open;
+
+        if self.drive_open {
+            self.drive.update(cx, |drive, cx| drive.focus(window, cx));
+        }
+
+        cx.notify();
+    }
+
+    /// Fetches whatever the Drive field names, and adds it to the library.
+    ///
+    /// The whole of it — the sign-in, the download, reading the document —
+    /// happens on a background thread, because the first fetch of a session
+    /// waits for a browser window the reader has to come back from.
+    pub(crate) fn add_from_drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drive_busy {
+            return;
+        }
+
+        let link = self.drive.read(cx).value().trim().to_owned();
+        if link.is_empty() {
+            return;
+        }
+
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        // Nothing can be fetched without a client id, and saying so before the
+        // browser opens is the only place the reader can act on it.
+        let Some(credentials) = pedro_drive::Credentials::from_env() else {
+            self.notice = Some(pedro_drive::DriveError::NotConfigured.to_string().into());
+            cx.notify();
+            return;
+        };
+
+        self.drive_busy = true;
+        // Whether this needs a browser is a question for the keychain, and the
+        // keychain is not something to ask on the thread drawing frames — it
+        // can put a dialog of its own up first. One message covers both.
+        self.notice = Some("Fetching from Google Drive… (a browser may open to sign in)".into());
+        self.drive
+            .update(cx, |drive, cx| drive.set_value("", window, cx));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let added = cx
+                .background_executor()
+                .spawn(async move {
+                    let directory = pedro_drive::scratch();
+                    let mut failures = Vec::new();
+
+                    match pedro_drive::fetch(&credentials, &link, &directory) {
+                        Ok(fetched) => {
+                            let mut store = store.lock();
+                            if let Err(err) = store.add_document(&fetched.path) {
+                                failures.push(format!("{}: {err}", fetched.name));
+                            }
+                        }
+                        Err(err) => failures.push(err.to_string()),
+                    }
+
+                    // The library has taken its own copy under a content hash
+                    // by now, so what was fetched is nothing but a temporary
+                    // file in the way.
+                    let _ = std::fs::remove_dir_all(&directory);
+
+                    store
+                        .lock()
+                        .books()
+                        .map_err(|err| err.to_string())
+                        .map(|books| (books, failures))
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.drive_busy = false;
+                this.documents_added(added, cx);
+            })
+            .ok();
         })
         .detach();
     }
@@ -363,6 +511,52 @@ impl Pedro {
         cx.notify();
     }
 
+    /// Looks for what is in the search box, across every book.
+    ///
+    /// One query per change of the box rather than one per keystroke debounced:
+    /// the index answers in well under a frame, and a result that lands after
+    /// the reader has typed more is thrown away by comparing the query it was
+    /// for.
+    fn search_books(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_query(cx);
+        if query == self.searched_for {
+            return;
+        }
+
+        self.searched_for = query.clone();
+        if query.is_empty() {
+            self.hits.clear();
+            return;
+        }
+
+        let Some(store) = self.library.store().cloned() else {
+            return;
+        };
+
+        cx.spawn(async move |this, cx| {
+            let asked = query.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move { store.lock().search(&query).map_err(|err| err.to_string()) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                // The reader has typed more since; this answer is stale.
+                if this.searched_for != asked {
+                    return;
+                }
+
+                match found {
+                    Ok(hits) => this.hits = hits,
+                    Err(why) => tracing::warn!(why, "the search failed"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The panel for wherever the reader is, built from what is on screen now.
     pub(crate) fn panel(&self) -> Panel {
         let open = self.open_document();
@@ -381,6 +575,8 @@ impl Pedro {
                 highlights: open.map(|open| open.highlights.as_slice()).unwrap_or(&[]),
                 chat: self.chat.as_ref(),
                 answering: self.answering_kind(),
+                query: &self.searched_for,
+                hits: &self.hits,
                 library_path: self.library.path(),
                 zoom: self.zoom,
             },
@@ -434,6 +630,15 @@ impl Pedro {
 
         if let Some(highlight_id) = entry.id.strip_prefix("highlight:") {
             self.open_marked_passage(&highlight_id.to_owned(), cx);
+            return;
+        }
+
+        if let Some(hit) = entry.id.strip_prefix("hit:") {
+            if let Some((book_id, page)) = hit.rsplit_once(':')
+                && let Ok(page) = page.parse::<u32>()
+            {
+                self.open_found(&book_id.to_owned(), page, cx);
+            }
             return;
         }
 
@@ -538,6 +743,12 @@ impl Pedro {
                 let mut open = OpenDocument::new(document, size, page);
                 open.highlights = highlights;
                 tab.document = Some(open);
+
+                // Where it was asked to go, or where the reader left off.
+                let page = self.turn_to_when_open.take().unwrap_or(page);
+                if let Some(open) = &mut tab.document {
+                    open.page = page.clamp(1, open.page_count.max(1));
+                }
 
                 // The list holds the position now, so continuing where the
                 // reader left off is a scroll rather than a page number.
@@ -880,6 +1091,31 @@ impl Pedro {
                 }
             })
             .detach();
+    }
+
+    /// Opens the book a search hit is in, at the page it is on.
+    fn open_found(&mut self, book_id: &str, page: u32, cx: &mut Context<Self>) {
+        let Some(book) = self
+            .library
+            .books()
+            .iter()
+            .find(|book| book.id == book_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let tab_id: SharedString = format!("book:{}", book.id).into();
+        let already_open = self.tabs.iter().any(|tab| tab.id == tab_id);
+        self.open_entry(&Entry::opening(tab_id, crate::library::title_of(&book)), cx);
+
+        // A book that had to be read first turns to the page when it lands;
+        // one that was already open can turn now.
+        if already_open {
+            self.show_page(page, cx);
+        } else {
+            self.turn_to_when_open = Some(page);
+        }
     }
 
     /// Turns to a marked passage and reopens what was asked about it.

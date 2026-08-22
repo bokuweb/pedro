@@ -19,7 +19,7 @@ fn reading(name: &str, pages: &[&str], marked: &str, page: u32) -> (Store, Highl
     let root = std::env::temp_dir().join(format!("pedro-chat-{name}"));
     let _ = std::fs::remove_dir_all(&root);
 
-    let store = Store::open(&root).expect("a writable library");
+    let mut store = Store::open(&root).expect("a writable library");
     let source = root.join("book.pdf");
     std::fs::write(&source, pdf_with_pages(pages)).expect("a writable file");
 

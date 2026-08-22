@@ -3,7 +3,7 @@
 - Kind: implementation plan
 - Scope: what pedro has to grow to be [chatbook](https://github.com/skanehira/chatbook)
   without a server, and in which order
-- Last updated: 2026-08-20
+- Last updated: 2026-08-22
 
 chatbook is a self-hosted PDF reader: you drag-select a passage of a technical
 book, ask about it, and the answer streams back with citations that resolve to
@@ -104,12 +104,62 @@ Consequences worth stating plainly:
 - **`is_error` is not `subtype`.** `claude` reports "Not logged in" as
   `{"subtype":"success","is_error":true}`. The runner reads `is_error`.
 
+### Search: the words and what they mean, in the same SQLite file
+
+chatbook has no search. Pedro grows one because the alternative — a question
+can only be asked about a passage the reader has already found — makes a
+five-hundred-page book worse to ask about than to read.
+
+Both kinds of search live in the file the library is already in, so there is no
+second service to run and nothing to keep in step:
+
+- **Words**: FTS5. `unicode61` cannot segment Japanese — it has no spaces to
+  segment on, and the whole of 「エラトステネスのふるいで素数を生成する」 is
+  one token to it. So text is cut into overlapping character bigrams before it
+  is indexed and before it is searched (東京駅 → 東京, 京駅), which is what
+  makes a search inside a word find it.
+- **Meaning**: `sqlite-vec`, filled by a static embedding model — a table of
+  token vectors, mean-pooled and normalised. 134MB, MIT, no transformer, no
+  GPU, and a book of 1,800 passages embeds in about forty seconds on the CPU.
+
+Their scores are not comparable — bm25 counts down from zero, cosine counts up
+from minus one — so the two rankings are fused by position (reciprocal rank,
+k=60) rather than by score.
+
+Two numbers in this are measured rather than picked, and both exist to let a
+search answer *nothing*:
+
+- A nearest-neighbour search always has a nearest. Without a floor, a question
+  about primes attached the six least-unrelated pages of a book that never
+  mentions them. With this model a question and a passage that answers it score
+  0.43–0.81, and a question against another subject 0.06 and below
+  (`cargo run -p pedro-search --example similarity`); the floor sits at 0.25, in
+  the gap.
+- A bigram query is joined with OR, because a segmented phrase rarely matches
+  in full. One incidental bigram is therefore enough to return a passage —
+  fine in a search box, where ranking sorts it out and the reader can see what
+  they got, and not fine in a prompt, where a loosely related passage is
+  indistinguishable from one that answers the question. So the retrieval that
+  feeds a prompt also asks how much of the question the passage actually
+  contains, and takes it only at half or better.
+
+The result is that a question about primes carries the pages about primes, and
+a question about Italian recipes carries nothing at all
+(`cargo run -p pedro-core --example context -- "…"`).
+
+`vec0` measures in L2 unless asked otherwise, and for normalised vectors that is
+`sqrt(2 - 2·cos)` — a real distance, but not one a similarity can be read off by
+subtracting from one. It is asked for cosine, and a table built before it was
+asked is rebuilt rather than reused, because reading old distances as cosines
+would rank a book backwards.
+
 ## Layout
 
 ```
 crates/
   pedro-agent   discovery (done) + invocation of the agent CLIs
   pedro-pdf     pdfium: pages, rasterisation, text with per-character boxes, outline
+  pedro-search  the index: bigram FTS5, vectors, and the fusion of the two
   pedro-core    the domain: store, library, excerpts, citations, chat
   pedro-app     the GPUI application
 ```
@@ -142,7 +192,11 @@ Each step leaves the workspace building and tested.
    becomes a system prompt, a conversation, a stream of tokens, and finally a
    stored answer with resolved citations. Runnable as
    `cargo run -p pedro-core --example ask`.
-7. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
+7. ✅ **`pedro-search` and retrieval** — the index above, the library-wide
+   search box, and the passages a question carries beyond the pages the reader
+   marked. Runnable as `cargo run -p pedro-core --example find` and
+   `--example context`.
+8. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
    continuous scroll, selection and highlights, chat panel with streaming and
    citations, contents, settings, and the keys for turning and zooming. Vim and
    Emacs bindings and two-page spreads are the parts of step 7 still open.
