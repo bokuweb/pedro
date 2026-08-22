@@ -96,6 +96,27 @@ chatbook's real thinking is — be covered by tests that run without a window.
 cargo run -p pedro-app
 ```
 
+### As an application
+
+`cargo run` opens the window, but a bare executable is not an application to
+macOS: it has no name in the menu bar, it is not in the Dock, it cannot be
+double-clicked or told to come to the front, and it does not open a PDF you drop
+on it.
+
+```bash
+./scripts/bundle.sh
+```
+
+builds `target/Pedro.app`, which carries pdfium and — if you fetched it — the
+embedding model inside itself, so the app still finds both after you drag it to
+`/Applications`. Without that they are found by looking above the working
+directory, and an application has nothing above it.
+
+The bundle is signed ad-hoc, which is enough to run on the machine that built
+it. Giving a copy to someone else needs a Developer ID and notarisation.
+
+### Where the library lives
+
 The library lives in the application support directory. `PEDRO_LIBRARY_PATH`
 names another one, which is how a change is tried against a copy of a real
 library — a migration, a screen that has never been seen with real books in it —

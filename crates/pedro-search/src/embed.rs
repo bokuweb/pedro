@@ -243,23 +243,45 @@ fn normalise(vector: &mut [f32]) {
 }
 
 /// Where the model is, if it is anywhere.
+/// Where the model might be, in the order worth trying.
+///
+/// The same order pdfium is looked for in, and for the same reason: what the
+/// developer said, then what the application carries, then what happens to be
+/// above the working directory.
 fn model_path() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("PEDRO_EMBEDDING_PATH") {
         return Some(PathBuf::from(configured));
     }
 
-    let roots = std::env::current_dir().into_iter().chain(
-        std::env::current_exe()
-            .ok()
-            .and_then(|executable| executable.parent().map(Path::to_path_buf)),
-    );
+    let beside_the_executable = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf));
 
-    roots
-        .flat_map(|root| {
-            root.ancestors()
-                .map(|ancestor| ancestor.join("vendor/embedding"))
-                .collect::<Vec<_>>()
+    // Inside the macOS bundle, which is the only copy an application dragged
+    // to /Applications has: there is no vendor directory above it, and without
+    // this the reader loses searching by meaning by moving the app.
+    let carried = beside_the_executable
+        .iter()
+        .flat_map(|directory| {
+            [
+                directory.join("../Resources/embedding"),
+                directory.join("embedding"),
+            ]
         })
+        .collect::<Vec<_>>();
+
+    let roots = std::env::current_dir()
+        .into_iter()
+        .chain(beside_the_executable);
+    let vendored = roots.flat_map(|root| {
+        root.ancestors()
+            .map(|ancestor| ancestor.join("vendor/embedding"))
+            .collect::<Vec<_>>()
+    });
+
+    carried
+        .into_iter()
+        .chain(vendored)
         .find(|candidate| candidate.join("model.safetensors").is_file())
 }
 
