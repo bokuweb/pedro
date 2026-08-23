@@ -47,7 +47,9 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
-        ToggleSpread
+        ToggleSpread,
+        FirstPage,
+        LastPage
     ]
 );
 
@@ -1137,7 +1139,7 @@ impl Pedro {
                 // The list holds the position now, so continuing where the
                 // reader left off is a scroll — to the row the page is in,
                 // which is not the page number once two share a row.
-                tab.scroll.scroll_to_item(row, ScrollStrategy::Top);
+                tab.scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
             }
             Err(why) => {
                 tracing::error!(why, tab_id, "could not open the book");
@@ -1170,13 +1172,33 @@ impl Pedro {
         };
         open.lay_out(layout);
 
-        // The list measures itself with ranges past the last row. Those hold no
-        // page, and the reader has not moved to one.
+        // Rows past the last one hold no page and nothing to draw.
         let Some(top) = open.rows.first_page(range.start) else {
             return;
         };
+
+        // The list asks for rows twice a frame and means different things by
+        // it: once for the rows it is about to draw, and once for a single row
+        // at the top, only to find out how tall a row is. The second is not the
+        // reader looking at page one, and answering it as though it were cost
+        // two bugs.
+        //
+        // It put the reader on two pages every frame — each written to the
+        // database, and the page in the status strip flickering between them.
+        // Worse, it asked pdfium for the first pages of the book every frame,
+        // and a page far from where the reader is does not survive being
+        // filed: `store` keeps only the pages around them. So the first page
+        // was drawn, thrown away, and drawn again for as long as the reader sat
+        // anywhere but the beginning — sixty-four thousand times in the minute
+        // this took to find.
+        if range.start == 0 && range.len() == 1 && open.rows.len() > 1 {
+            return;
+        }
+
         let moved = open.page != top;
-        open.page = top;
+        if moved {
+            open.page = top;
+        }
 
         // One row beyond the range in each direction, so scrolling by a row
         // never waits for pdfium.
@@ -1204,11 +1226,7 @@ impl Pedro {
         }
 
         if moved {
-            tracing::debug!(
-                top,
-                drawn_at = ?self.page_bounds.borrow().get(&top),
-                "the page in view changed"
-            );
+            tracing::debug!(top, "the page in view changed");
             self.save_reading_position(cx);
         }
     }
@@ -1469,7 +1487,7 @@ impl Pedro {
             // The list is what holds the position, so a page turn is a scroll —
             // to the row the page is in, which is not its number in a spread.
             if let Some(scroll) = self.page_scroll() {
-                scroll.scroll_to_item(row, ScrollStrategy::Top);
+                scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
             }
             cx.notify();
         }
@@ -1645,6 +1663,18 @@ impl Pedro {
 
     fn previous_page(&mut self, _: &PreviousPage, _: &mut Window, cx: &mut Context<Self>) {
         self.turn_page(-1, cx);
+    }
+
+    fn first_page(&mut self, _: &FirstPage, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_page(1, cx);
+    }
+
+    fn last_page(&mut self, _: &LastPage, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.open_document().map(|open| open.page_count) else {
+            return;
+        };
+
+        self.show_page(last, cx);
     }
 
     /// The book the reader is looking at, if any.
@@ -2279,7 +2309,7 @@ impl Pedro {
         // The list is keyed by the layout, so the new one starts unscrolled;
         // put it back on the page the reader was reading.
         if let Some(scroll) = self.page_scroll() {
-            scroll.scroll_to_item(row, ScrollStrategy::Top);
+            scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
         }
 
         self.save_reading_position(cx);
@@ -2558,7 +2588,7 @@ impl Pedro {
             if let Some(row) = row
                 && let Some(scroll) = self.page_scroll()
             {
-                scroll.scroll_to_item(row, ScrollStrategy::Top);
+                scroll.scroll_to_item_strict(row, ScrollStrategy::Top);
             }
         }
     }
@@ -2614,6 +2644,8 @@ impl Render for Pedro {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::toggle_spread))
+            .on_action(cx.listener(Self::first_page))
+            .on_action(cx.listener(Self::last_page))
             .size_full()
             .text_color(cx.theme().foreground)
             .text_size(px(15.))

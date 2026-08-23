@@ -42,7 +42,7 @@ and the answer arrives beside the page with sources that turn back to it.
 | Reopening a conversation from the mark that started it | Done |
 | Contents, Highlights, Agents and Settings panels | Done |
 | Keyboard: arrows to turn pages, ⌘± to zoom, ⌘K to search | Done |
-| Vim and Emacs key bindings | Not started |
+| Vim and Emacs key bindings | Done |
 | Two-page spreads | Done |
 | Reading a PDF out of Google Drive | Done |
 
@@ -153,10 +153,11 @@ passage stays marked, and pressing a mark reopens what was asked about it.
 
 | | |
 | --- | --- |
-| Turn pages | `←` `→` |
+| Turn pages | `←` `→` `↑` `↓`, or `j` `k`, or `C-n` `C-p` `C-v` `M-v` |
+| The start or the end | `home` `end`, or `gg` `G`, or `M-<` `M->` |
 | One page or two, as the book was printed | `⌘⇧S` (one again when the window is too narrow for two) |
 | Zoom | `⌘-` `⌘=` `⌘0` |
-| Search the sidebar | `⌘K` |
+| Search the sidebar | `⌘K`, or `/`, or `C-s` |
 | Choose which CLI answers | Agents, in the sidebar under More |
 | Stop an answer | Stop, under the answer being written |
 | Remove a book or a mark | Remove on its row, which asks twice |
