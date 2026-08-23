@@ -199,7 +199,7 @@ pub struct Pedro {
     /// Kept here so that following the tab costs one comparison a frame rather
     /// than a window handle at every place a tab can change — several of which,
     /// like opening the last-read book at startup, have no window to give.
-    composer_hint: &'static str,
+    pub(crate) composer_hint: &'static str,
 }
 
 impl Pedro {
