@@ -4,6 +4,8 @@
 mod app;
 mod chat;
 mod document;
+#[cfg(test)]
+mod e2e;
 mod library;
 mod palette;
 mod panes;
@@ -32,45 +34,7 @@ fn main() {
     Application::new()
         .with_assets(gpui_component_assets::Assets)
         .run(|cx: &mut App| {
-            gpui_component::init(cx);
-            palette::apply_to_theme(cx);
-            cx.bind_keys([
-                KeyBinding::new("cmd-k", FocusSearch, None),
-                // Bound in the shell's own context so that the text field's
-                // bindings, which sit deeper, keep the arrows for the caret
-                // while the reader is typing a question.
-                KeyBinding::new("right", NextPage, Some("Pedro")),
-                KeyBinding::new("left", PreviousPage, Some("Pedro")),
-                // Both spellings of the same key: the plus is a shifted equals
-                // on most layouts, and readers press whichever they think of.
-                KeyBinding::new("cmd-=", ZoomIn, None),
-                KeyBinding::new("cmd-+", ZoomIn, None),
-                KeyBinding::new("cmd--", ZoomOut, None),
-                KeyBinding::new("cmd-0", ZoomReset, None),
-                // One sheet or two, the way the book was printed.
-                KeyBinding::new("cmd-shift-s", ToggleSpread, None),
-                // The keys every tabbed application uses for this.
-                // What every editor with two side panels uses.
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-alt-b", ToggleChat, None),
-                KeyBinding::new("cmd-shift-]", NextTab, None),
-                KeyBinding::new("cmd-shift-[", PreviousTab, None),
-                // Registered after `gpui_component::init`, so these shadow the
-                // ones it binds for the same keys in the same context.
-                //
-                // Enter sends the question and shift-enter breaks the line,
-                // the way every chat does it. Both still insert a newline
-                // first — a multi-line field is what they are for — and the
-                // one that sends throws the field away anyway. `secondary` is
-                // how the two are told apart afterwards.
-                KeyBinding::new("enter", Enter { secondary: true }, Some("Input")),
-                KeyBinding::new("shift-enter", Enter { secondary: false }, Some("Input")),
-                // Emacs' backspace. macOS turns ctrl-h into one for native
-                // text views, and a view that draws its own text has to say so
-                // itself.
-                KeyBinding::new("ctrl-h", Backspace, Some("Input")),
-                KeyBinding::new("ctrl-d", gpui_component::input::Delete, Some("Input")),
-            ]);
+            install(cx);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {
@@ -105,4 +69,51 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// Everything the application needs in place before a window is opened.
+///
+/// A function rather than the body of `main`, because the tests open a
+/// window too and a keymap that only `main` installs is a keymap the tests
+/// cannot press.
+pub(crate) fn install(cx: &mut App) {
+    gpui_component::init(cx);
+    palette::apply_to_theme(cx);
+    cx.bind_keys([
+        KeyBinding::new("cmd-k", FocusSearch, None),
+        // Bound in the shell's own context so that the text field's
+        // bindings, which sit deeper, keep the arrows for the caret
+        // while the reader is typing a question.
+        KeyBinding::new("right", NextPage, Some("Pedro")),
+        KeyBinding::new("left", PreviousPage, Some("Pedro")),
+        // Both spellings of the same key: the plus is a shifted equals
+        // on most layouts, and readers press whichever they think of.
+        KeyBinding::new("cmd-=", ZoomIn, None),
+        KeyBinding::new("cmd-+", ZoomIn, None),
+        KeyBinding::new("cmd--", ZoomOut, None),
+        KeyBinding::new("cmd-0", ZoomReset, None),
+        // One sheet or two, the way the book was printed.
+        KeyBinding::new("cmd-shift-s", ToggleSpread, None),
+        // The keys every tabbed application uses for this.
+        // What every editor with two side panels uses.
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-alt-b", ToggleChat, None),
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PreviousTab, None),
+        // Registered after `gpui_component::init`, so these shadow the
+        // ones it binds for the same keys in the same context.
+        //
+        // Enter sends the question and shift-enter breaks the line,
+        // the way every chat does it. Both still insert a newline
+        // first — a multi-line field is what they are for — and the
+        // one that sends throws the field away anyway. `secondary` is
+        // how the two are told apart afterwards.
+        KeyBinding::new("enter", Enter { secondary: true }, Some("Input")),
+        KeyBinding::new("shift-enter", Enter { secondary: false }, Some("Input")),
+        // Emacs' backspace. macOS turns ctrl-h into one for native
+        // text views, and a view that draws its own text has to say so
+        // itself.
+        KeyBinding::new("ctrl-h", Backspace, Some("Input")),
+        KeyBinding::new("ctrl-d", gpui_component::input::Delete, Some("Input")),
+    ]);
 }

@@ -196,7 +196,7 @@ pub struct Pedro {
     pub(crate) chat_scroll: ScrollHandle,
     /// Whether the panel is following an answer as it is written. Off while the
     /// reader is reading something further up, on again when they come back.
-    chat_follows: bool,
+    pub(crate) chat_follows: bool,
 
     /// Where a Google Drive link is pasted, and whether that row is showing.
     ///
@@ -280,8 +280,16 @@ impl Pedro {
         Self::detect_agents(cx);
         Self::open_library(cx);
 
+        // The shell takes the focus as the window opens, because every key the
+        // reader can press is dispatched along the focus path and nothing else
+        // here claims it. Without this the keyboard does nothing at all until
+        // they happen to click something — and the key for focusing the search
+        // field is itself a key, so it cannot be what starts them off.
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle);
+
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             search,
             composer,
             shelf_name,
@@ -1471,7 +1479,7 @@ impl Pedro {
     ///
     /// Fire and forget: a place that fails to save is worth a log line and
     /// nothing more, since the reader is still looking at the page.
-    fn save_reading_position(&self, cx: &mut Context<Self>) {
+    fn save_reading_position(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.library.store().cloned() else {
             return;
         };
@@ -1487,6 +1495,25 @@ impl Pedro {
         else {
             return;
         };
+
+        // Written to the list the shell is holding as well as to the database.
+        // A book reopened in the same session is read out of that list, and a
+        // list that only learns where the reader was when the library is opened
+        // again sends them back to where they were when the window opened.
+        if let Library::Ready { books, .. } = &mut self.library
+            && let Some(book) = books.iter_mut().find(|book| book.id == book_id)
+        {
+            let reading = book.reading.get_or_insert(ReadingState {
+                page,
+                highlight_id: None,
+                outline_open: None,
+                chat_panel_open: None,
+                spread: None,
+            });
+
+            reading.page = page;
+            reading.spread = Some(layout.is_spread());
+        }
 
         cx.background_executor()
             .spawn(async move {
