@@ -396,7 +396,14 @@ impl Pedro {
     ///
     /// After the library is handed over rather than before it, so that the
     /// shelf is on screen while this happens: a book of five hundred pages is
-    /// a few thousand passages to cut and write.
+    /// a few thousand passages to cut, embed and write.
+    ///
+    /// The store is taken three times — once to see what is waiting, once per
+    /// book to write it — and let go of in between. Held across the embedding
+    /// instead, it kept the reader waiting on a spinner for as long as the
+    /// indexing took: opening a book needs the same store to find the file, and
+    /// a lock is a lock. Five and a half seconds of that was the bug this
+    /// arrangement exists to prevent.
     fn index_missing_books(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.library.store().cloned() else {
             return;
@@ -404,11 +411,35 @@ impl Pedro {
 
         cx.background_executor()
             .spawn(async move {
-                match store.lock().index_missing() {
-                    Ok(0) => {}
-                    Ok(done) => tracing::info!(books = done, "indexed books added earlier"),
-                    Err(err) => tracing::warn!(?err, "could not index the older books"),
+                let (waiting, embedder) = {
+                    let store = store.lock();
+
+                    match store.awaiting_index() {
+                        Ok(waiting) => (waiting, store.embedder()),
+                        Err(err) => {
+                            tracing::warn!(?err, "could not see which books need indexing");
+                            return;
+                        }
+                    }
+                };
+
+                if waiting.is_empty() {
+                    return;
                 }
+
+                let mut done = 0;
+                for book in &waiting {
+                    // The slow half, with nothing held.
+                    let prepared =
+                        pedro_core::store::cut_and_embed(&book.full_text, embedder.as_deref());
+
+                    match store.lock().write_index(&book.book_id, &prepared) {
+                        Ok(()) => done += 1,
+                        Err(err) => tracing::warn!(?err, "could not index a book"),
+                    }
+                }
+
+                tracing::info!(books = done, "indexed books added earlier");
             })
             .detach();
     }
@@ -483,7 +514,11 @@ impl Pedro {
                     // reported, and the rest are still added.
                     let mut failures = Vec::new();
                     for path in paths {
-                        if let Err(err) = store.add_document(&path) {
+                        // Indexed afterwards rather than here: cutting and
+                        // embedding a five-hundred-page book takes five seconds,
+                        // and the store is held for all of it — during which the
+                        // reader cannot open anything.
+                        if let Err(err) = store.add_document_unindexed(&path) {
                             failures.push(format!("{}: {err}", path.display()));
                         }
                     }
@@ -558,7 +593,7 @@ impl Pedro {
                     match pedro_drive::fetch(&credentials, &link, &directory) {
                         Ok(fetched) => {
                             let mut store = store.lock();
-                            if let Err(err) = store.add_document(&fetched.path) {
+                            if let Err(err) = store.add_document_unindexed(&fetched.path) {
                                 failures.push(format!("{}: {err}", fetched.name));
                             }
                         }
@@ -607,6 +642,11 @@ impl Pedro {
                 self.notice = Some(why.into());
             }
         }
+
+        // A book just added has no index yet, and this is the one path that
+        // knows it. Runs without the store held, so the book it added can be
+        // opened while it is being indexed.
+        self.index_missing_books(cx);
 
         cx.notify();
     }
