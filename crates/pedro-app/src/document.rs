@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::spread::Layout;
+use crate::spread::{Layout, Rows};
 
 use gpui::{RenderImage, SharedString};
 use image::{Frame, RgbaImage};
@@ -43,10 +43,6 @@ impl Page {
 /// A page that has been rasterised, and the text that is on it.
 pub struct Page {
     pub image: Arc<RenderImage>,
-    /// The page's own size in points. Pages of one book are not all the same
-    /// shape, and a page drawn in another page's proportions is a page whose
-    /// character boxes no longer land on its words.
-    pub size: PageSize,
     /// Every character and where it sits, which is what turns a drag into a
     /// passage.
     pub text: PageText,
@@ -114,9 +110,8 @@ pub struct OpenDocument {
     /// Shared with the background thread that rasterises pages.
     pub document: Arc<Document>,
     pub page_count: u32,
-    /// The size of the first page, in points, which every page is laid out
-    /// against. A book whose pages differ in size is rare enough that measuring
-    /// each one would cost more than it is worth.
+    /// The size of the first page, in points, and what a page of unknown
+    /// number is measured against.
     pub size: PageSize,
     /// The page at the top of the viewport, one-based, the way the reader
     /// counts. What the composer quotes and where the place is saved.
@@ -125,6 +120,14 @@ pub struct OpenDocument {
     /// the book rather than of the reader — a scanned spread wants it and a
     /// slide deck does not — so it is stored and restored per book.
     pub layout: Layout,
+    /// Every page's size, read in one pass when the book was opened.
+    ///
+    /// Held for the whole book rather than looked up as pages arrive: a row
+    /// laid out around the pages in it moves every time one of them turns out
+    /// to be a different shape from the first page.
+    pub sizes: Vec<PageSize>,
+    /// Which pages share a row, for the layout it was built for.
+    pub rows: Rows,
     /// The pages that have been rasterised, by page number.
     pub pages: HashMap<u32, Page>,
     /// The pages pdfium is working on, so the same one is not asked for twice.
@@ -143,8 +146,15 @@ pub struct OpenDocument {
 }
 
 impl OpenDocument {
-    pub fn new(document: Document, size: PageSize, page: u32, layout: Layout) -> Self {
+    pub fn new(
+        document: Document,
+        size: PageSize,
+        sizes: Vec<PageSize>,
+        page: u32,
+        layout: Layout,
+    ) -> Self {
         let page_count = document.page_count();
+        let rows = Rows::build(layout, &sizes);
 
         Self {
             document: Arc::new(document),
@@ -152,6 +162,8 @@ impl OpenDocument {
             size,
             page: page.clamp(1, page_count.max(1)),
             layout,
+            sizes,
+            rows,
             pages: HashMap::new(),
             requested: HashSet::new(),
             generation: 0,
@@ -200,10 +212,34 @@ impl OpenDocument {
     /// shape once it has been read, the first page's before that — which is
     /// what the rows are sized by before anything has been read at all.
     pub fn width_of(&self, page: u32, height: f32) -> f32 {
-        match self.page(page) {
-            Some(held) => width_at(held.size, height),
-            None => width_at(self.size, height),
+        width_at(self.size_of(page), height)
+    }
+
+    /// A page's own size, known from the moment the book was opened.
+    pub fn size_of(&self, page: u32) -> PageSize {
+        self.sizes
+            .get(page.max(1) as usize - 1)
+            .copied()
+            .unwrap_or(self.size)
+    }
+
+    /// Lays the book out again, for a layout it was not built for.
+    pub fn lay_out(&mut self, layout: Layout) {
+        if self.rows.layout() != layout {
+            self.rows = Rows::build(layout, &self.sizes);
         }
+    }
+
+    /// How large a page is drawn inside a box `width` by `height`.
+    ///
+    /// Fitted rather than scaled by height alone, because a book is not all one
+    /// shape: a plan or a scanned spread turns up sideways in a book of upright
+    /// pages, and a sideways A3 drawn to the height of an A4 is half again as
+    /// wide as the column it is in. Fitting keeps every page inside its column
+    /// whatever shape it is, and a page that does not fill the column is
+    /// centred in it rather than stretched to it.
+    pub fn drawn_size(&self, page: u32, height: f32, width: f32) -> (f32, f32) {
+        fitted(self.size_of(page), height, width)
     }
 
     /// The scale to rasterise at so a page drawn `height` pixels tall has a
@@ -364,6 +400,17 @@ impl OpenDocument {
 }
 
 /// How wide a page of `size` is when drawn `height` logical pixels tall.
+/// A page of `size` drawn as large as it can be inside a box.
+fn fitted(size: PageSize, height: f32, width: f32) -> (f32, f32) {
+    if size.width <= 0. || size.height <= 0. {
+        return (width, height);
+    }
+
+    let scale = (height / size.height).min(width / size.width);
+
+    (size.width * scale, size.height * scale)
+}
+
 fn width_at(size: PageSize, height: f32) -> f32 {
     match size.height {
         0.0 => height,
@@ -477,5 +524,57 @@ mod tests {
         let image = as_render_image(page).expect("a full buffer");
         let size = image.size(0);
         assert_eq!((u32::from(size.width), u32::from(size.height)), (3, 2));
+    }
+}
+
+#[cfg(test)]
+mod fitting {
+    use super::{PageSize, fitted};
+
+    fn sized(width: f32, height: f32) -> PageSize {
+        PageSize { width, height }
+    }
+
+    /// An upright page in a column wider than it needs is decided by the
+    /// height, which is what makes every upright page in a book one size.
+    #[test]
+    fn an_upright_page_is_as_tall_as_it_is_allowed() {
+        let (width, height) = fitted(sized(595., 842.), 640., 490.);
+
+        assert!((height - 640.).abs() < 0.01, "{height}");
+        assert!((width - 452.3).abs() < 0.5, "{width}");
+    }
+
+    /// A sideways A3 among upright A4s is the case this exists for: by height
+    /// alone it would be 905 wide in a column of 490.
+    #[test]
+    fn a_sideways_page_is_held_to_the_width_of_its_column() {
+        let a3_landscape = sized(1191., 842.);
+        let (width, height) = fitted(a3_landscape, 640., 490.);
+
+        assert!(width <= 490.01, "{width} spilled out of its column");
+        assert!(height < 640., "{height} should be short, not tall");
+        // And it keeps its shape.
+        assert!(
+            (width / height - 1191. / 842.).abs() < 0.01,
+            "{width}x{height}"
+        );
+    }
+
+    /// Every upright page of the same shape comes out the same size, whatever
+    /// else is in the book — which is what stops a row moving as its
+    /// neighbours load.
+    #[test]
+    fn pages_of_one_shape_are_one_size() {
+        let a4 = fitted(sized(595., 842.), 640., 490.);
+        let also_a4 = fitted(sized(1190., 1684.), 640., 490.);
+
+        assert!((a4.0 - also_a4.0).abs() < 0.01);
+        assert!((a4.1 - also_a4.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_page_of_no_size_fills_what_it_is_given() {
+        assert_eq!(fitted(sized(0., 0.), 640., 490.), (490., 640.));
     }
 }

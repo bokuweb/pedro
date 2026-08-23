@@ -244,6 +244,29 @@ for a row rather than assuming the page number is one.
 The layout is stored per book rather than per reader, because it is a property
 of the book: a scanned spread wants it and a slide deck does not.
 
+**A book is not all one shape.** A page turned sideways among upright ones is a
+fold-out: it *is* the spread, and pairing it with the page after it gives the
+reader half a plan beside an unrelated page of text. So a sideways page takes a
+row to itself and the whole width, and so does the page it would have faced —
+which keeps every later pair on the same side of the book as before.
+
+**What a page is measured against is the page itself, from the moment the book
+opens.** The first version measured the first page and used that until each page
+arrived at its true shape, which moved the row while the reader was in it. Every
+size is now read in one pass at open: asking the page table costs about seven
+milliseconds for a five-hundred-page book, where asking the pages themselves
+costs seven milliseconds *each*. The window is divided into columns before
+anything is drawn, and a page that does not fill its column is centred in it, so
+nothing moves as the pixels arrive.
+
+**Two pages need twice the width, and the window does not grow to meet them.**
+A spread drawn at the size a single page had runs off the right edge; shrunk to
+fit, it gets smaller the narrower the window is, which is the wrong thing to
+take from a reader who is already short of room. So a window with no room for
+two pages shows one, and shows two again when there is room — closing a panel or
+zooming out is another way to make room. What the reader asked for is what is
+remembered; what there is room for is what is drawn.
+
 **What this cost, and what it turned up.** The first version answered "page 1"
 for a row past the end of the book. The scrolling list measures itself with
 ranges beyond the last row, every frame — so every frame the reader was reported
@@ -330,6 +353,30 @@ each shaped the design:
   laid out.** A scrolling list lays its rows out in its own space and translates
   them on the way to the screen, so bounds taken during layout are in neither
   the space the mouse is reported in nor the space the page is drawn in.
+
+### One connection, one mutex, and the things that must not hold it
+
+The store is a single SQLite connection behind a mutex, which is the right shape
+for a reader with one window — and it means anything slow that holds it stops
+everything else that needs it.
+
+Two things were slow enough to matter, and both were found the same way: by
+timing the log rather than by reading the code.
+
+- **Indexing at startup** held the store for five and a half seconds while it
+  cut and embedded eighteen hundred passages. Opening a book needs the same
+  store to find the file, so the reader watched a spinner for all of it. The
+  cutting and the embedding touch no database; they now happen with nothing
+  held, and the store is taken only to read the list and to write each book.
+  The book opens in a quarter of a second.
+- **Adding a book** did the same indexing inline. It now adds the book and
+  indexes afterwards, so a five-hundred-page book is in the library at once and
+  searchable a few seconds later.
+
+The rule this leaves is worth stating: *what holds the store must be a query*.
+Anything that thinks — embedding, rasterising, waiting on an agent — reads what
+it needs, lets go, and comes back to write. The chat already worked this way,
+for the same reason and after the same symptom.
 
 ## Deliberately not ported
 

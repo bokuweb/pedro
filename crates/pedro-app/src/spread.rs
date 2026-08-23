@@ -8,6 +8,8 @@
 //! Everything else in the reader counts in pages and the scrolling list counts
 //! in rows, so this is the one place that knows how to turn one into the other.
 
+use pedro_pdf::PageSize;
+
 /// How many pages are drawn side by side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Layout {
@@ -35,46 +37,89 @@ impl Layout {
             Layout::Spread => Layout::Single,
         }
     }
+}
 
-    /// How many rows a book of `pages` pages has.
-    pub fn rows(self, pages: u32) -> usize {
-        match self {
-            Layout::Single => pages as usize,
-            // The cover has a row of its own, and the rest pair off after it.
-            Layout::Spread => match pages {
-                0 => 0,
-                _ => 1 + (pages as usize - 1).div_ceil(2),
-            },
-        }
-    }
+/// Which pages are drawn in which row, worked out once for a book.
+///
+/// The arithmetic version of this — the cover alone, then pairs — is right
+/// only for a book that is all one shape. A page turned sideways among upright
+/// ones is a fold-out: it is the spread, and pairing it with the page after it
+/// gives the reader half a plan beside an unrelated page of text. So a sideways
+/// page takes a row to itself, and so does the page it would have faced, which
+/// keeps every later pair on the same side of the book as before.
+///
+/// Built from every page's size rather than from the first page's, because a
+/// row that consults the pages as they arrive moves while the reader is reading
+/// it. Every size is known before the first page is drawn — the whole table
+/// costs about seven milliseconds for a five-hundred-page book.
+pub struct Rows {
+    layout: Layout,
+    rows: Vec<Vec<u32>>,
+    /// The row each page is in, indexed by page number minus one.
+    of_page: Vec<usize>,
+}
 
-    /// The pages drawn in a row, in the order they are drawn.
-    ///
-    /// Empty past the end of the book, which is what lets a caller ask about a
-    /// row the list has not caught up with yet.
-    pub fn pages(self, row: usize, pages: u32) -> Vec<u32> {
-        if pages == 0 {
-            return Vec::new();
-        }
-
-        let wanted: Vec<u32> = match self {
-            Layout::Single => vec![row as u32 + 1],
-            Layout::Spread if row == 0 => vec![1],
-            Layout::Spread => vec![row as u32 * 2, row as u32 * 2 + 1],
+impl Rows {
+    pub fn build(layout: Layout, sizes: &[PageSize]) -> Self {
+        let count = sizes.len() as u32;
+        let sideways = |page: u32| {
+            sizes
+                .get(page as usize - 1)
+                .is_some_and(|size| size.width > size.height)
         };
 
-        wanted.into_iter().filter(|page| *page <= pages).collect()
+        let mut rows: Vec<Vec<u32>> = Vec::new();
+        match layout {
+            Layout::Single => rows.extend((1..=count).map(|page| vec![page])),
+            Layout::Spread => {
+                if count >= 1 {
+                    rows.push(vec![1]);
+                }
+
+                let mut page = 2;
+                while page <= count {
+                    let facing = (page < count).then_some(page + 1);
+                    match facing {
+                        // A sideways page anywhere in the pair breaks it, and
+                        // both halves take a row of their own.
+                        Some(next) if sideways(page) || sideways(next) => {
+                            rows.push(vec![page]);
+                            rows.push(vec![next]);
+                        }
+                        Some(next) => rows.push(vec![page, next]),
+                        None => rows.push(vec![page]),
+                    }
+
+                    page += 2;
+                }
+            }
+        }
+
+        let mut of_page = vec![0; count as usize];
+        for (index, row) in rows.iter().enumerate() {
+            for page in row {
+                of_page[*page as usize - 1] = index;
+            }
+        }
+
+        Self {
+            layout,
+            rows,
+            of_page,
+        }
     }
 
-    /// The row a page is drawn in.
-    pub fn row(self, page: u32) -> usize {
-        match self {
-            Layout::Single => page.max(1) as usize - 1,
-            Layout::Spread => match page {
-                0 | 1 => 0,
-                page => page as usize / 2,
-            },
-        }
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The pages in a row, empty past the end of the book.
+    pub fn pages(&self, row: usize) -> &[u32] {
+        self.rows.get(row).map(Vec::as_slice).unwrap_or_default()
     }
 
     /// The first page of a row, which is the page the reader is taken to be on.
@@ -84,61 +129,124 @@ impl Layout {
     /// answering "page 1" for those is not a smaller mistake than answering
     /// nothing: it tells the reader they are back at the cover, which moves the
     /// place, which saves it, which draws again.
-    pub fn first_page(self, row: usize, pages: u32) -> Option<u32> {
-        self.pages(row, pages).first().copied()
+    pub fn first_page(&self, row: usize) -> Option<u32> {
+        self.pages(row).first().copied()
+    }
+
+    /// The row a page is drawn in.
+    pub fn row_of(&self, page: u32) -> usize {
+        self.of_page
+            .get(page.max(1) as usize - 1)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Layout;
+    use super::{Layout, Rows};
+    use pedro_pdf::PageSize;
+
+    fn upright() -> PageSize {
+        PageSize {
+            width: 595.,
+            height: 842.,
+        }
+    }
+
+    fn sideways() -> PageSize {
+        PageSize {
+            width: 1191.,
+            height: 842.,
+        }
+    }
+
+    fn book(pages: usize) -> Vec<PageSize> {
+        vec![upright(); pages]
+    }
 
     #[test]
     fn one_page_to_a_row_is_the_page_itself() {
-        assert_eq!(Layout::Single.rows(30), 30);
-        assert_eq!(Layout::Single.pages(0, 30), vec![1]);
-        assert_eq!(Layout::Single.pages(16, 30), vec![17]);
-        assert_eq!(Layout::Single.row(17), 16);
+        let rows = Rows::build(Layout::Single, &book(30));
+
+        assert_eq!(rows.len(), 30);
+        assert_eq!(rows.pages(0), [1]);
+        assert_eq!(rows.pages(16), [17]);
+        assert_eq!(rows.row_of(17), 16);
     }
 
     /// The cover faces nothing, which is what makes every later pair even-odd.
     #[test]
     fn the_cover_is_alone_and_the_rest_pair_off() {
-        assert_eq!(Layout::Spread.pages(0, 30), vec![1]);
-        assert_eq!(Layout::Spread.pages(1, 30), vec![2, 3]);
-        assert_eq!(Layout::Spread.pages(2, 30), vec![4, 5]);
+        let rows = Rows::build(Layout::Spread, &book(30));
+
+        assert_eq!(rows.pages(0), [1]);
+        assert_eq!(rows.pages(1), [2, 3]);
+        assert_eq!(rows.pages(2), [4, 5]);
     }
 
     #[test]
     fn a_page_knows_which_row_it_is_in() {
-        assert_eq!(Layout::Spread.row(1), 0);
-        assert_eq!(Layout::Spread.row(2), 1);
-        assert_eq!(Layout::Spread.row(3), 1);
-        assert_eq!(Layout::Spread.row(4), 2);
+        let rows = Rows::build(Layout::Spread, &book(30));
 
-        // And a row's first page is the page that row is at.
+        assert_eq!(rows.row_of(1), 0);
+        assert_eq!(rows.row_of(2), 1);
+        assert_eq!(rows.row_of(3), 1);
+        assert_eq!(rows.row_of(4), 2);
+
         for page in 1..=30 {
-            let row = Layout::Spread.row(page);
-            assert!(Layout::Spread.pages(row, 30).contains(&page), "page {page}");
+            let row = rows.row_of(page);
+            assert!(rows.pages(row).contains(&page), "page {page}");
         }
+    }
+
+    /// A fold-out is the spread. Pairing it with the page after it gives the
+    /// reader half a plan beside an unrelated page of text.
+    #[test]
+    fn a_sideways_page_takes_a_row_to_itself() {
+        let mut sizes = book(12);
+        sizes[3] = sideways(); // page 4
+
+        let rows = Rows::build(Layout::Spread, &sizes);
+
+        assert_eq!(rows.pages(0), [1]);
+        assert_eq!(rows.pages(1), [2, 3]);
+        assert_eq!(rows.pages(2), [4], "the fold-out shared its row");
+        assert_eq!(rows.pages(3), [5], "the page it would have faced");
+        // And the pairs afterwards are on the same side of the book as before.
+        assert_eq!(rows.pages(4), [6, 7]);
+    }
+
+    /// Two fold-outs facing each other are still a row each: they are two
+    /// sheets, not one spread.
+    #[test]
+    fn two_sideways_pages_do_not_pair_with_each_other() {
+        let mut sizes = book(8);
+        sizes[3] = sideways();
+        sizes[4] = sideways();
+
+        let rows = Rows::build(Layout::Spread, &sizes);
+
+        assert_eq!(rows.pages(2), [4]);
+        assert_eq!(rows.pages(3), [5]);
     }
 
     /// A book with an even number of pages ends on a half-empty spread rather
     /// than on a page that is not there.
     #[test]
     fn the_last_spread_may_hold_one_page() {
-        assert_eq!(Layout::Spread.rows(4), 3);
-        assert_eq!(Layout::Spread.pages(2, 4), vec![4]);
+        assert_eq!(Rows::build(Layout::Spread, &book(4)).len(), 3);
+        assert_eq!(Rows::build(Layout::Spread, &book(4)).pages(2), [4]);
 
-        assert_eq!(Layout::Spread.rows(5), 3);
-        assert_eq!(Layout::Spread.pages(2, 5), vec![4, 5]);
+        assert_eq!(Rows::build(Layout::Spread, &book(5)).len(), 3);
+        assert_eq!(Rows::build(Layout::Spread, &book(5)).pages(2), [4, 5]);
     }
 
     #[test]
     fn a_book_of_one_page_has_one_row_either_way() {
-        assert_eq!(Layout::Single.rows(1), 1);
-        assert_eq!(Layout::Spread.rows(1), 1);
-        assert_eq!(Layout::Spread.pages(0, 1), vec![1]);
+        assert_eq!(Rows::build(Layout::Single, &book(1)).len(), 1);
+        assert_eq!(Rows::build(Layout::Spread, &book(1)).len(), 1);
+        assert_eq!(Rows::build(Layout::Spread, &book(1)).pages(0), [1]);
     }
 
     /// The list measures itself with ranges past the last row, so this is asked
@@ -146,14 +254,12 @@ mod tests {
     /// a flutter at startup into a loop that never settled.
     #[test]
     fn a_row_past_the_end_holds_nothing() {
-        assert!(Layout::Spread.pages(50, 30).is_empty());
-        assert!(Layout::Single.pages(50, 30).is_empty());
-        assert!(Layout::Spread.pages(0, 0).is_empty());
+        let rows = Rows::build(Layout::Spread, &book(30));
 
-        assert_eq!(Layout::Single.first_page(50, 30), None);
-        assert_eq!(Layout::Spread.first_page(50, 30), None);
-        assert_eq!(Layout::Single.first_page(16, 30), Some(17));
-        assert_eq!(Layout::Spread.first_page(1, 30), Some(2));
+        assert!(rows.pages(50).is_empty());
+        assert_eq!(rows.first_page(50), None);
+        assert_eq!(rows.first_page(1), Some(2));
+        assert!(Rows::build(Layout::Spread, &[]).pages(0).is_empty());
     }
 
     #[test]
