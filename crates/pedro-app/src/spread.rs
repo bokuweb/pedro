@@ -78,7 +78,7 @@ impl Rows {
 
                 let mut page = 2;
                 while page <= count {
-                    let facing = (page + 1 <= count).then_some(page + 1);
+                    let facing = (page < count).then_some(page + 1);
                     match facing {
                         // A sideways page anywhere in the pair breaks it, and
                         // both halves take a row of their own.
