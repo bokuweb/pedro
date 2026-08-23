@@ -192,10 +192,16 @@ pub struct Section {
     /// The shelf this section is, when it is one.
     ///
     /// A shelf is a section whose header does something: it opens, it takes a
-    /// book dropped on it, and it can be renamed or thrown away. "Reading" and
-    /// "Recently added" are groupings rather than things, so they carry `None`
-    /// and their headers only fold.
+    /// book dropped on it, and it can be thrown away. A grouping only folds.
     pub shelf: Option<SharedString>,
+    /// How many shelves deep the header stands, counting itself. 1 for a
+    /// grouping and for a shelf at the top level; the sidebar steps a row in
+    /// by this, which is the only thing that says what is inside what.
+    pub depth: usize,
+    /// How many books a question to this shelf would read — everything on it
+    /// and under it, which is not the number of rows beneath the header once
+    /// shelves stand on shelves.
+    pub book_count: Option<u32>,
 }
 
 impl Section {
@@ -204,14 +210,18 @@ impl Section {
             title: title.into(),
             entries,
             shelf: None,
+            depth: 1,
+            book_count: None,
         }
     }
 
-    fn shelf(folder: &Folder, entries: Vec<Entry>) -> Self {
+    fn shelf(folder: &Folder, depth: usize, entries: Vec<Entry>) -> Self {
         Self {
             title: folder.name.clone().into(),
             entries,
             shelf: Some(folder.id.clone().into()),
+            depth,
+            book_count: Some(folder.book_count),
         }
     }
 
@@ -295,20 +305,11 @@ impl Panel {
         // Shelves first, in the order they were made, each one shown even when
         // it is empty: a shelf that vanishes when its last book is moved off it
         // is a shelf the reader cannot put anything back on.
-        let mut sections: Vec<Section> = library
-            .shelves()
-            .iter()
-            .map(|shelf| {
-                let on_it = library
-                    .books()
-                    .iter()
-                    .filter(|book| book.folder_id.as_deref() == Some(shelf.id.as_str()))
-                    .map(row_for)
-                    .collect();
-
-                Section::shelf(shelf, on_it)
-            })
-            .collect();
+        //
+        // Depth first, so a shelf is followed by its own books and then by the
+        // shelves standing on it — the order the reader would read it out in.
+        let mut sections: Vec<Section> = Vec::new();
+        shelves_under(library, None, 1, &mut sections);
 
         // Then the books on no shelf, split by whether the reader has been into
         // them: "where was I" and "what did I add" are different questions, and
@@ -516,6 +517,26 @@ pub struct Shown<'a> {
     /// What the reader is searching for, and what that found.
     pub query: &'a str,
     pub hits: &'a [pedro_search::Hit],
+}
+
+/// Every shelf standing on `parent`, each followed by what stands on it.
+///
+/// Recursive because the arrangement is, and bounded by the depth the store
+/// enforces rather than by anything here: a shelf that somehow pointed into a
+/// ring would be a ring in the database, and the walk that draws it is not the
+/// place to discover that.
+fn shelves_under(library: &Library, parent: Option<&str>, depth: usize, into: &mut Vec<Section>) {
+    for shelf in library.shelves_on(parent) {
+        let on_it = library
+            .books()
+            .iter()
+            .filter(|book| book.folder_id.as_deref() == Some(shelf.id.as_str()))
+            .map(row_for)
+            .collect();
+
+        into.push(Section::shelf(shelf, depth, on_it));
+        shelves_under(library, Some(&shelf.id), depth + 1, into);
+    }
 }
 
 /// A passage as one line, for a list that has room for one.

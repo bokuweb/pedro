@@ -57,6 +57,12 @@ pub enum StoreError {
 
     #[error("no folder with id {0}")]
     NoSuchFolder(String),
+
+    #[error("a shelf can be {MAX_SHELF_DEPTH} deep, and this would be deeper")]
+    ShelfTooDeep,
+
+    #[error("a shelf cannot be put on itself")]
+    ShelfInsideItself,
 }
 
 /// The reader's books, highlights and conversations.
@@ -69,6 +75,14 @@ pub struct Store {
     /// meaning is what it adds. See `scripts/fetch-embedding.sh`.
     embedder: Option<pedro_search::Embedder>,
 }
+
+/// How many shelves may stand inside one another.
+///
+/// Three, counting the one at the top level. Deep enough for the arrangement a
+/// reader actually draws — a subject, its sub-subjects, a shelf for the ones
+/// they are in the middle of — and shallow enough that a shelf is still a place
+/// they can point at rather than a path they have to remember.
+pub const MAX_SHELF_DEPTH: usize = 3;
 
 /// How many passages a search returns before anyone asks for fewer.
 const SEARCH_LIMIT: usize = 40;
@@ -584,33 +598,158 @@ impl Store {
         Ok(message)
     }
 
-    /// Makes a shelf. Names are not unique: two shelves called "later" are two
-    /// shelves, and telling them apart is the reader's business, not ours.
-    pub fn create_folder(&self, name: &str) -> Result<Folder, StoreError> {
+    /// Makes a shelf, at the top level or inside `parent`.
+    ///
+    /// Names are not unique: two shelves called "later" are two shelves, and
+    /// telling them apart is the reader's business, not ours.
+    pub fn create_folder(&self, name: &str, parent: Option<&str>) -> Result<Folder, StoreError> {
+        if let Some(parent) = parent
+            && self.depth_of(parent)? >= MAX_SHELF_DEPTH
+        {
+            return Err(StoreError::ShelfTooDeep);
+        }
+
         let folder = Folder {
             id: new_id(),
             name: name.trim().to_owned(),
+            parent_id: parent.map(str::to_owned),
             created_at: OffsetDateTime::now_utc(),
             book_count: 0,
         };
 
-        self.connection.execute(
-            "INSERT INTO folders (id, name, created_at) VALUES (?1, ?2, ?3)",
-            params![folder.id, folder.name, format_time(folder.created_at)],
-        )?;
+        self.connection
+            .execute(
+                "INSERT INTO folders (id, name, parent_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    folder.id,
+                    folder.name,
+                    folder.parent_id,
+                    format_time(folder.created_at)
+                ],
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    StoreError::NoSuchFolder(parent.unwrap_or_default().to_owned())
+                }
+                other => StoreError::Database(other),
+            })?;
 
         Ok(folder)
     }
 
-    /// Every shelf, oldest first, each with how many books are on it.
+    /// Puts a shelf on another one, or takes it back to the top level.
+    ///
+    /// A shelf cannot be put on itself or on anything standing on it — that
+    /// would make a ring that no walk ever comes out of — and the tree it
+    /// carries with it has to fit under where it lands.
+    pub fn move_folder(&self, id: &str, parent: Option<&str>) -> Result<(), StoreError> {
+        if let Some(parent) = parent {
+            if parent == id || self.is_under(parent, id)? {
+                return Err(StoreError::ShelfInsideItself);
+            }
+
+            // The moved shelf keeps whatever is standing on it, so what has to
+            // fit is the whole subtree rather than the one row being moved.
+            if self.depth_of(parent)? + self.height_of(id)? > MAX_SHELF_DEPTH {
+                return Err(StoreError::ShelfTooDeep);
+            }
+        }
+
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE folders SET parent_id = ?2 WHERE id = ?1",
+                params![id, parent],
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    StoreError::NoSuchFolder(parent.unwrap_or_default().to_owned())
+                }
+                other => StoreError::Database(other),
+            })?;
+
+        match changed {
+            0 => Err(StoreError::NoSuchFolder(id.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
+    /// How many shelves deep this one stands, counting itself: 1 at the top.
+    fn depth_of(&self, id: &str) -> Result<usize, StoreError> {
+        let depth: Option<i64> = self.connection.query_row(
+            "WITH RECURSIVE above(id, parent_id, depth) AS ( \
+                 SELECT id, parent_id, 1 FROM folders WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT f.id, f.parent_id, above.depth + 1 \
+                 FROM folders f JOIN above ON f.id = above.parent_id \
+             ) SELECT max(depth) FROM above",
+            [id],
+            |row| row.get(0),
+        )?;
+
+        depth
+            .map(|depth| depth as usize)
+            .ok_or_else(|| StoreError::NoSuchFolder(id.to_owned()))
+    }
+
+    /// How many levels this shelf's own tree has, counting itself: 1 when
+    /// nothing stands on it.
+    fn height_of(&self, id: &str) -> Result<usize, StoreError> {
+        let height: Option<i64> = self.connection.query_row(
+            "WITH RECURSIVE below(id, height) AS ( \
+                 SELECT id, 1 FROM folders WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT f.id, below.height + 1 \
+                 FROM folders f JOIN below ON f.parent_id = below.id \
+             ) SELECT max(height) FROM below",
+            [id],
+            |row| row.get(0),
+        )?;
+
+        height
+            .map(|height| height as usize)
+            .ok_or_else(|| StoreError::NoSuchFolder(id.to_owned()))
+    }
+
+    /// Whether `id` stands somewhere on `ancestor`, however far down.
+    fn is_under(&self, id: &str, ancestor: &str) -> Result<bool, StoreError> {
+        let found: i64 = self.connection.query_row(
+            "WITH RECURSIVE above(id, parent_id) AS ( \
+                 SELECT id, parent_id FROM folders WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT f.id, f.parent_id FROM folders f JOIN above ON f.id = above.parent_id \
+             ) SELECT count(*) FROM above WHERE parent_id = ?2",
+            params![id, ancestor],
+            |row| row.get(0),
+        )?;
+
+        Ok(found > 0)
+    }
+
+    /// Every shelf, oldest first, each with how many books it answers from.
+    ///
+    /// The tree is not built here: the rows carry their parent and the caller
+    /// arranges them, because the sidebar wants them in reading order and a
+    /// question wants one subtree, and neither is served by the other's shape.
     ///
     /// Oldest first rather than most-recently-used: a sidebar whose rows move
     /// when they are used is a sidebar the reader has to read every time.
     pub fn folders(&self) -> Result<Vec<Folder>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT f.id, f.name, f.created_at, count(b.id) AS book_count \
-             FROM folders f LEFT JOIN books b ON b.folder_id = f.id \
-             GROUP BY f.id ORDER BY f.created_at, f.rowid",
+            "WITH RECURSIVE under(root, id) AS ( \
+                 SELECT id, id FROM folders \
+                 UNION ALL \
+                 SELECT under.root, f.id FROM folders f JOIN under ON f.parent_id = under.id \
+             ) \
+             SELECT f.id, f.name, f.parent_id, f.created_at, ( \
+                 SELECT count(*) FROM books b JOIN under u ON b.folder_id = u.id \
+                 WHERE u.root = f.id \
+             ) AS book_count \
+             FROM folders f ORDER BY f.created_at, f.rowid",
         )?;
         let folders = statement
             .query_map([], read_folder)?
@@ -678,7 +817,26 @@ impl Store {
         }
     }
 
-    /// The books on a shelf, most recently touched first.
+    /// The books a question to a shelf is answered from: everything on it and
+    /// on every shelf under it, most recently touched first.
+    pub fn books_under(&self, folder_id: &str) -> Result<Vec<Book>, StoreError> {
+        let mut statement = self.connection.prepare(&format!(
+            "WITH RECURSIVE under(id) AS ( \
+                 SELECT id FROM folders WHERE id = ?1 \
+                 UNION ALL \
+                 SELECT f.id FROM folders f JOIN under ON f.parent_id = under.id \
+             ) \
+             {BOOK_COLUMNS} WHERE folder_id IN (SELECT id FROM under) \
+             ORDER BY updated_at DESC, rowid DESC"
+        ))?;
+        let books = statement
+            .query_map([folder_id], read_book)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(books)
+    }
+
+    /// The books standing on a shelf itself, most recently touched first.
     pub fn books_in(&self, folder_id: &str) -> Result<Vec<Book>, StoreError> {
         let mut statement = self.connection.prepare(&format!(
             "{BOOK_COLUMNS} WHERE folder_id = ?1 ORDER BY updated_at DESC, rowid DESC"
@@ -779,6 +937,7 @@ fn read_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
     Ok(Folder {
         id: row.get("id")?,
         name: row.get("name")?,
+        parent_id: row.get("parent_id")?,
         created_at: read_time(&row.get::<_, String>("created_at")?),
         book_count: row.get("book_count")?,
     })
@@ -979,6 +1138,16 @@ CREATE INDEX messages_by_folder ON chat_messages(folder_id);
 COMMIT;
 "#;
 
+const NESTED_SHELVES: &str = r#"
+BEGIN;
+
+ALTER TABLE folders ADD COLUMN parent_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
+
+CREATE INDEX folders_by_parent ON folders(parent_id);
+
+COMMIT;
+"#;
+
 /// Brings the database up to the current schema.
 ///
 /// `user_version` rather than a migrations table: there is one writer, one
@@ -1018,6 +1187,14 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         }
 
         connection.pragma_update(None, "user_version", 4)?;
+    }
+
+    if version < 5 {
+        // Shelves learned to stand on one another. Existing ones stay where
+        // they are: a null parent is the top level, which is where every shelf
+        // made before this was.
+        connection.execute_batch(NESTED_SHELVES)?;
+        connection.pragma_update(None, "user_version", 5)?;
     }
 
     Ok(())

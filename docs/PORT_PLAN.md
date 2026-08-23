@@ -209,14 +209,21 @@ reader finds the conversation again. That difference is named once, as
 
 Three decisions worth stating:
 
-- **Shelves are flat.** A question put to a tree would have to say how deep it
-  goes, which is a thing to explain and a thing to get wrong, in return for an
-  arrangement a library this size does not need.
-- **Deleting a shelf keeps its books.** An arrangement of the library is not
-  part of it, so `folder_id` is set to null rather than cascading. The
-  conversation with the shelf does go, because it was the shelf's.
+- **Shelves nest, three deep.** A question put to a tree has to say how deep it
+  goes, so it says the only thing a reader would expect: a shelf is asked with
+  everything under it. That rule is one sentence at any depth, which is what
+  makes the arrangement worth having — and three levels is deep enough for a
+  subject, its sub-subjects and a shelf of what is being read now, while a shelf
+  stays a place to point at rather than a path to remember. The depth is the
+  store's to enforce, in `create_folder` and `move_folder`, so a drag that would
+  break it is refused rather than flattened.
+- **Deleting a shelf keeps its books, and the shelves standing on it.** An
+  arrangement of the library is not part of it, so `folder_id` and `parent_id`
+  are both set to null rather than cascading: the books stay, and what stood on
+  the deleted shelf comes back to the top level. The conversation with the shelf
+  does go, because it was the shelf's.
 - **The model is never asked which book it is quoting.** A source is resolved by
-  looking its quotation up in each book on the shelf until one holds it. A title
+  looking its quotation up in each book under the shelf until one holds it. A title
   the model copies slightly wrong would cost the reader the jump; a quotation it
   copies slightly wrong is already handled, by the fragment matching the
   citation lookup has always done.

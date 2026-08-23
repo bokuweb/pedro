@@ -84,13 +84,28 @@ impl Pedro {
             return render_empty_state().into_any_element();
         };
 
+        // Everything under the shelf, not only what stands on it directly: a
+        // question to it reads the shelves inside it too, and this is where
+        // the reader sees what that means.
         let books: Vec<_> = self
             .library
-            .books()
-            .iter()
-            .filter(|book| book.folder_id.as_deref() == Some(shelf.id.as_str()))
+            .books_under(&shelf.id)
+            .into_iter()
             .map(|book| self.render_shelf_book(book, &shelf.id, cx))
             .collect();
+
+        // Where it stands, when it stands on something. The name itself is the
+        // field below; this is the part of it the reader cannot edit.
+        let above: Option<SharedString> = match self.library.ancestors_of(&shelf.id).as_slice() {
+            [] => None,
+            path => Some(
+                path.iter()
+                    .map(|shelf| shelf.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+                    .into(),
+            ),
+        };
 
         let empty = books.is_empty();
         let id = shelf.id.clone();
@@ -98,6 +113,14 @@ impl Pedro {
         v_flex()
             .size_full()
             .overflow_hidden()
+            .children(above.map(|above| {
+                div()
+                    .px(px(28.))
+                    .pt(px(20.))
+                    .text_size(px(11.))
+                    .text_color(palette::text_faint())
+                    .child(above)
+            }))
             .child(
                 h_flex()
                     .px(px(28.))
@@ -117,10 +140,12 @@ impl Pedro {
                     .text_color(palette::text_faint())
                     .child(match empty {
                         true => SharedString::from(
-                            "Drag books here from the sidebar, or right-click one to put it on                              this shelf.",
+                            "Drag books here from the sidebar, or right-click one to put \
+                             it on this shelf.",
                         ),
                         false => SharedString::from(format!(
-                            "{} book{} — a question in the panel is answered from all of them.",
+                            "{} book{} — a question in the panel is answered from all of them, \
+                             on this shelf and on every shelf inside it.",
                             books.len(),
                             if books.len() == 1 { "" } else { "s" }
                         )),

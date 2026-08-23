@@ -382,13 +382,54 @@ fn a_question_can_be_about_two_passages_at_once() {
     );
 }
 
+/// A shelf is asked with everything under it, so a book that has been filed one
+/// level further in is still a book the answer can be drawn from.
+#[test]
+fn a_question_to_a_shelf_reaches_the_shelves_inside_it() {
+    let (store, shelf_id) = shelf("nested");
+    let inside = store
+        .create_folder("鍵", Some(&shelf_id))
+        .expect("a shelf on a shelf");
+    let keys = store
+        .books()
+        .expect("a query")
+        .into_iter()
+        .find(|book| book.file_name == "keys.pdf")
+        .expect("the book");
+    store
+        .move_book(&keys.id, Some(&inside.id))
+        .expect("a shelved book");
+
+    let recorder = recording("chat-shelf-nested");
+
+    ask(
+        &store,
+        &agent(recorder.clone()),
+        &about_shelf(&shelf_id, "key length"),
+        &Cancellation::new(),
+        &mut |_| {},
+    )
+    .expect("an answering agent");
+
+    let sent = written(&recorder, "command.txt");
+
+    assert!(
+        sent.contains("keys.pdf"),
+        "the book on the shelf inside was not named: {sent}"
+    );
+    assert!(
+        sent.contains("the key length is chosen from the work factor"),
+        "the passage was not sent: {sent}"
+    );
+}
+
 /// A shelf of two books, each with a distinctive passage in it.
 fn shelf(name: &str) -> (Store, String) {
     let root = std::env::temp_dir().join(format!("pedro-shelf-{name}"));
     let _ = std::fs::remove_dir_all(&root);
 
     let mut store = Store::open(&root).expect("a writable library");
-    let shelf = store.create_folder("暗号").expect("a shelf");
+    let shelf = store.create_folder("暗号", None).expect("a shelf");
 
     // Latin text: the fixture writes a PDF whose text extraction mangles
     // anything else, so a Japanese passage would come back out as mojibake and
@@ -500,7 +541,7 @@ fn a_question_to_an_empty_shelf_says_so() {
     let root = std::env::temp_dir().join("pedro-shelf-empty");
     let _ = std::fs::remove_dir_all(&root);
     let store = Store::open(&root).expect("a writable library");
-    let shelf = store.create_folder("空").expect("a shelf");
+    let shelf = store.create_folder("空", None).expect("a shelf");
 
     let error = ask(
         &store,
