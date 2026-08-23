@@ -88,6 +88,8 @@ impl Pedro {
                     .p(px(12.))
                     .gap(px(12.))
                     .overflow_y_scroll()
+                    .track_scroll(&self.chat_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _, _, _| this.chat_scrolled()))
                     .children(turns)
                     // The question is shown the moment it is asked, above an
                     // answer that has not started: a question that disappears

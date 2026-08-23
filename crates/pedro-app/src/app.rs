@@ -30,7 +30,7 @@ use crate::palette;
 use crate::panes::Pane;
 use crate::spread::Layout;
 use crate::state::{AgentStatus, Entry, OpenTab, Panel, RailItem, ShelfMenu, Shown};
-use gpui::UniformListScrollHandle;
+use gpui::{ScrollHandle, UniformListScrollHandle};
 use pedro_agent::AgentError;
 use pedro_core::Conversation as CoreConversation;
 
@@ -54,6 +54,24 @@ actions!(
 /// What the composer says it will ask about, which follows the tab.
 const ASK_A_DOCUMENT: &str = "Ask about this document… (⏎ to send, ⇧⏎ for a line)";
 const ASK_A_SHELF: &str = "Ask across these books… (⏎ to send, ⇧⏎ for a line)";
+
+/// Whether to pull the conversation to its foot this frame, and whether it is
+/// still following afterwards.
+///
+/// Scrolling back to the foot puts the reader in tow again, so leaving is not a
+/// mode they have to find their way out of. Nothing is pulled while no answer
+/// is being written: a reader looking back over a finished conversation is not
+/// following anything.
+fn following(answering: bool, follows: bool, at_foot: bool) -> (bool, bool) {
+    let follows = follows || at_foot;
+
+    (answering && follows, follows)
+}
+
+/// How far from the foot of a conversation still counts as being at it. About
+/// a line of text: enough that an answer growing between one frame and the next
+/// does not read as the reader scrolling away.
+const NEARLY_THE_FOOT: f32 = 24.;
 
 /// How tall a page is drawn at 100%, in logical pixels.
 ///
@@ -153,6 +171,16 @@ pub struct Pedro {
     pub(crate) notice: Option<SharedString>,
     /// Set on mouse-down in the title strip so the next drag moves the window.
     pub(crate) window_drag_armed: bool,
+    /// Where the conversation is scrolled to.
+    ///
+    /// Held here rather than left to the element, because an answer being
+    /// written has to be followed: the text grows below the fold, and a panel
+    /// that does not move leaves the reader looking at the start of an answer
+    /// they finished reading a paragraph ago.
+    pub(crate) chat_scroll: ScrollHandle,
+    /// Whether the panel is following an answer as it is written. Off while the
+    /// reader is reading something further up, on again when they come back.
+    chat_follows: bool,
 
     /// Where a Google Drive link is pasted, and whether that row is showing.
     ///
@@ -256,6 +284,8 @@ impl Pedro {
             open_at: None,
             notice: None,
             window_drag_armed: false,
+            chat_scroll: ScrollHandle::new(),
+            chat_follows: true,
             drive,
             drive_open: false,
             drive_busy: false,
@@ -1825,6 +1855,10 @@ impl Pedro {
         self.composer
             .update(cx, |composer, cx| composer.set_value("", window, cx));
 
+        // A reader who has just asked something wants to see it answered, from
+        // wherever they were reading.
+        self.chat_follows = true;
+
         let web_search = self.web_search;
         // Deltas arrive on the agent's thread and the view lives on this one,
         // so they travel by channel rather than by lock.
@@ -2077,6 +2111,47 @@ impl Pedro {
         cx.notify();
     }
 
+    /// Keeps the foot of a growing answer in view.
+    ///
+    /// Only while the reader is already at the foot of it. Following whatever
+    /// happens would drag them away from a paragraph they had scrolled back to
+    /// read, and an answer that takes a minute to write is a minute in which
+    /// they might. Scrolling back down puts them in tow again — the test is
+    /// where they are, not a mode they have to leave.
+    fn follow_the_answer(&mut self) {
+        let answering = self.chat.as_ref().is_some_and(Conversation::is_answering);
+        let (pull, follows) = following(answering, self.chat_follows, self.chat_at_foot());
+
+        self.chat_follows = follows;
+        if pull {
+            self.chat_scroll.scroll_to_bottom();
+        }
+    }
+
+    /// The reader has taken the conversation somewhere themselves.
+    ///
+    /// Told by the gesture rather than worked out from where the view ends up:
+    /// an answer that grows moves the foot away from the reader too, and a rule
+    /// that could not tell those apart would either stop following on its own
+    /// or drag the reader back from a paragraph they had gone to read.
+    pub(crate) fn chat_scrolled(&mut self) {
+        self.chat_follows = false;
+    }
+
+    /// Whether the conversation is scrolled to its foot, near enough.
+    ///
+    /// Near enough because the foot moves as the answer grows: by the time a
+    /// frame is drawn the text is a line longer than when the offset was last
+    /// set.
+    fn chat_at_foot(&self) -> bool {
+        let offset = f32::from(self.chat_scroll.offset().y);
+        let furthest = f32::from(self.chat_scroll.max_offset().height);
+
+        // Scrolling down counts down from zero, so the foot is the most
+        // negative the offset gets.
+        furthest + offset <= NEARLY_THE_FOOT
+    }
+
     /// Walks the answer onto the screen, one drawn frame at a time.
     ///
     /// This runs from `render` rather than from a timer, and that is the whole
@@ -2091,6 +2166,8 @@ impl Pedro {
     /// Asking for the next frame is what keeps it going; when there is nothing
     /// left to write nothing is asked for, and the window goes back to sleep.
     fn write_a_little_more(&mut self, window: &mut Window) {
+        self.follow_the_answer();
+
         let Some(chat) = &mut self.chat else {
             return;
         };
@@ -2334,5 +2411,39 @@ impl Render for Pedro {
                             .child(self.render_composer(cx)),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod following_an_answer {
+    use super::following;
+
+    /// The ordinary case: the reader is at the foot and the answer is growing.
+    #[test]
+    fn an_answer_is_followed_from_the_foot() {
+        assert_eq!(following(true, true, true), (true, true));
+    }
+
+    /// Having scrolled up, the reader is left where they are — an answer that
+    /// takes a minute to write is a minute in which they might be reading
+    /// something further up.
+    #[test]
+    fn a_reader_who_scrolled_away_is_left_there() {
+        assert_eq!(following(true, false, false), (false, false));
+    }
+
+    /// And coming back to the foot puts them in tow again, without having to
+    /// find a way out of a mode.
+    #[test]
+    fn coming_back_to_the_foot_follows_again() {
+        assert_eq!(following(true, false, true), (true, true));
+    }
+
+    /// Nothing is pulled about when there is nothing being written. A reader
+    /// looking over a finished conversation is not following anything.
+    #[test]
+    fn a_finished_conversation_is_left_alone() {
+        assert_eq!(following(false, true, true), (false, true));
+        assert_eq!(following(false, false, false), (false, false));
     }
 }
