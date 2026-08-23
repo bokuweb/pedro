@@ -125,8 +125,15 @@ fn written_out(pedro: &gpui::Entity<Pedro>, cx: &mut VisualTestContext) {
 /// will never finish says so rather than hanging.
 const MOST_FRAMES_AN_ANSWER_TAKES: usize = 600;
 
-fn a_book(pages: usize) -> Vec<u8> {
-    let text: Vec<String> = (1..=pages).map(|page| format!("page {page}")).collect();
+/// A book of `pages` pages, each saying which book and which page it is.
+///
+/// Named on every page because the library is content-addressed: two books
+/// whose bytes are identical are one book, and a fixture that forgets that
+/// quietly adds one book twice under two names.
+fn a_book(title: &str, pages: usize) -> Vec<u8> {
+    let text: Vec<String> = (1..=pages)
+        .map(|page| format!("{title} page {page}"))
+        .collect();
     let pages: Vec<&str> = text.iter().map(String::as_str).collect();
 
     pedro_pdf::fixtures::pdf_with_pages(&pages)
@@ -135,7 +142,7 @@ fn a_book(pages: usize) -> Vec<u8> {
 /// The first thing the reader sees: their books, without asking for them.
 #[gpui::test]
 async fn a_library_with_books_in_it_shows_them(cx: &mut TestAppContext) {
-    let reader = Reader::with("library", &[("one.pdf", a_book(4))]);
+    let reader = Reader::with("library", &[("one.pdf", a_book("one", 4))]);
     let (pedro, cx) = reader.open(cx);
 
     let books = pedro.read_with(cx, |pedro, _| {
@@ -153,7 +160,7 @@ async fn a_library_with_books_in_it_shows_them(cx: &mut TestAppContext) {
 /// Opening a book from the sidebar puts the reader in it, at its first page.
 #[gpui::test]
 async fn opening_a_book_puts_the_reader_in_it(cx: &mut TestAppContext) {
-    let reader = Reader::with("open", &[("one.pdf", a_book(6))]);
+    let reader = Reader::with("open", &[("one.pdf", a_book("one", 6))]);
     let (pedro, cx) = reader.open(cx);
 
     let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
@@ -175,7 +182,7 @@ async fn opening_a_book_puts_the_reader_in_it(cx: &mut TestAppContext) {
 /// is part of what is being tested.
 #[gpui::test]
 async fn the_keyboard_turns_the_pages_two_at_a_time(cx: &mut TestAppContext) {
-    let reader = Reader::with("spread-key", &[("one.pdf", a_book(6))]);
+    let reader = Reader::with("spread-key", &[("one.pdf", a_book("one", 6))]);
     let (pedro, cx) = reader.open(cx);
 
     let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
@@ -199,7 +206,7 @@ async fn the_keyboard_turns_the_pages_two_at_a_time(cx: &mut TestAppContext) {
 /// And it is remembered per book: a book closed in spreads opens in spreads.
 #[gpui::test]
 async fn how_a_book_was_read_is_how_it_opens(cx: &mut TestAppContext) {
-    let reader = Reader::with("spread-kept", &[("one.pdf", a_book(6))]);
+    let reader = Reader::with("spread-kept", &[("one.pdf", a_book("one", 6))]);
     let (pedro, cx) = reader.open(cx);
 
     let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
@@ -251,7 +258,7 @@ fn a_cli_answering(name: &str, answer: &str) -> PathBuf {
 /// return key, an agent answers it, and the source it names becomes a page.
 #[gpui::test]
 async fn a_question_about_a_passage_is_answered_and_its_source_resolved(cx: &mut TestAppContext) {
-    let reader = Reader::with("asking", &[("one.pdf", a_book(6))]);
+    let reader = Reader::with("asking", &[("one.pdf", a_book("one", 6))]);
     let (pedro, cx) = reader.open(cx);
 
     let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
@@ -269,7 +276,7 @@ async fn a_question_about_a_passage_is_answered_and_its_source_resolved(cx: &mut
         // The passage the reader dragged across, which the composer shows as a
         // chip and the question is about.
         pedro.attached = vec![NewHighlight {
-            selected_text: "page 3".to_owned(),
+            selected_text: "one page 3".to_owned(),
             page_number: 3,
             rects: Vec::new(),
         }];
@@ -306,5 +313,221 @@ async fn a_question_about_a_passage_is_answered_and_its_source_resolved(cx: &mut
 
         // The panel is still in tow, because the reader never left the foot.
         assert!(pedro.chat_follows, "the answer was not being followed");
+    });
+}
+
+/// A shelf is made, a book is put on it, and the sidebar says so.
+#[gpui::test]
+async fn a_book_can_be_put_on_a_shelf(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "shelving",
+        &[("one.pdf", a_book("one", 4)), ("two.pdf", a_book("two", 4))],
+    );
+    let (pedro, cx) = reader.open(cx);
+
+    let first = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
+
+    let shelf = pedro.update_in(cx, |pedro, window, cx| {
+        pedro.create_shelf(window, cx);
+        pedro.library.shelves()[0].id.clone()
+    });
+    cx.run_until_parked();
+
+    pedro.update_in(cx, |pedro, _, cx| {
+        pedro.shelve_book(&first, Some(&shelf), cx)
+    });
+    cx.run_until_parked();
+
+    pedro.read_with(cx, |pedro, cx| {
+        let shelved = pedro.library.shelves();
+        assert_eq!(shelved.len(), 1);
+        assert_eq!(shelved[0].book_count, 1, "the shelf did not count its book");
+
+        // And the sidebar draws it as a section of its own, with the book in it
+        // and the other book still outside.
+        let panel = crate::state::Panel::library(&pedro.library);
+        let section = panel
+            .sections
+            .iter()
+            .find(|section| section.shelf.as_ref().map(|id| id.as_ref()) == Some(shelf.as_str()))
+            .expect("a section for the shelf");
+
+        assert_eq!(section.entries.len(), 1);
+        assert!(section.entries[0].id.ends_with(&first));
+
+        let elsewhere: usize = panel
+            .sections
+            .iter()
+            .filter(|section| section.shelf.is_none())
+            .map(|section| section.entries.len())
+            .sum();
+        assert_eq!(elsewhere, 1, "the other book left the library");
+
+        let _ = cx;
+    });
+}
+
+/// Opening a shelf opens the panel it is asked in, and says so in the composer.
+#[gpui::test]
+async fn opening_a_shelf_opens_the_panel_it_is_asked_in(cx: &mut TestAppContext) {
+    let reader = Reader::with("shelf-open", &[("one.pdf", a_book("one", 4))]);
+    let (pedro, cx) = reader.open(cx);
+
+    let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
+    let shelf = pedro.update_in(cx, |pedro, window, cx| {
+        pedro.create_shelf(window, cx);
+        let shelf = pedro.library.shelves()[0].id.clone();
+        pedro.shelve_book(&book, Some(&shelf), cx);
+
+        shelf
+    });
+    cx.run_until_parked();
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro.open_shelf(&shelf, "暗号", window, cx)
+    });
+    // A frame, because what the composer says follows the tab as it is drawn.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    pedro.read_with(cx, |pedro, cx| {
+        assert_eq!(
+            pedro.active_tab().expect("a tab").id,
+            format!("shelf:{shelf}")
+        );
+        assert!(pedro.chat_pane.is_open(), "the shelf opened with no panel");
+        assert!(
+            pedro.composer_hint.contains("these books"),
+            "the composer is still asking about a document: {}",
+            pedro.composer_hint
+        );
+        let _ = cx;
+    });
+}
+
+/// A question put to a shelf is answered from the books on it, and the source
+/// it names says which book as well as which page.
+#[gpui::test]
+async fn a_question_to_a_shelf_says_which_book_it_came_from(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "shelf-asking",
+        &[
+            ("primes.pdf", a_book("primes", 4)),
+            ("keys.pdf", a_book("keys", 4)),
+        ],
+    );
+    let (pedro, cx) = reader.open(cx);
+
+    // Both books onto one shelf, which is then opened.
+    let shelf = pedro.update_in(cx, |pedro, window, cx| {
+        pedro.create_shelf(window, cx);
+        let shelf = pedro.library.shelves()[0].id.clone();
+
+        let books: Vec<String> = pedro
+            .library
+            .books()
+            .iter()
+            .map(|book| book.id.clone())
+            .collect();
+        for book in books {
+            pedro.shelve_book(&book, Some(&shelf), cx);
+        }
+
+        shelf
+    });
+    cx.run_until_parked();
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro.open_shelf(&shelf, "both", window, cx)
+    });
+    cx.run_until_parked();
+
+    // The answer quotes the second book, which is the whole point: nothing tells
+    // the reader which book that is except looking the quotation up.
+    let answer = "It is in the other one[1].\n\n## Sources\n[1] \"keys page 2\"";
+    pedro.update_in(cx, |pedro, _, _| {
+        pedro.agent_status = AgentStatus::Done(vec![DiscoveredAgent {
+            kind: AgentKind::ClaudeCode,
+            program: a_cli_answering("e2e-shelf-asking", answer),
+            version: None,
+        }]);
+    });
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro.composer.update(cx, |composer, cx| {
+            composer.focus(window, cx);
+        });
+    });
+    cx.simulate_input("which book?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    written_out(&pedro, cx);
+
+    pedro.read_with(cx, |pedro, _| {
+        let chat = pedro.chat.as_ref().expect("a conversation");
+        assert_eq!(chat.messages.len(), 2);
+
+        let citation = &chat.messages[1].citations[0];
+        assert_eq!(
+            citation.page,
+            Some(pedro_core::PageLocation::Found(2)),
+            "{citation:?}"
+        );
+        assert_eq!(
+            citation.book.as_ref().map(|book| book.title.as_str()),
+            Some("keys.pdf"),
+            "the citation did not say which book: {citation:?}"
+        );
+    });
+}
+
+/// Typing in the search box finds the passage, across books, and the sidebar
+/// shows what was found instead of the list of books.
+#[gpui::test]
+async fn searching_shows_passages_rather_than_books(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "searching",
+        &[
+            ("primes.pdf", a_book("primes", 4)),
+            ("keys.pdf", a_book("keys", 4)),
+        ],
+    );
+    let (pedro, cx) = reader.open(cx);
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro
+            .search
+            .update(cx, |search, cx| search.focus(window, cx));
+    });
+    cx.simulate_input("keys page 3");
+    cx.run_until_parked();
+
+    pedro.read_with(cx, |pedro, cx| {
+        assert!(!pedro.hits.is_empty(), "the search found nothing");
+
+        let found = &pedro.hits[0];
+        assert_eq!(found.page_number, 3, "{found:?}");
+        assert!(
+            found.text.contains("keys page 3"),
+            "the wrong passage came first: {found:?}"
+        );
+
+        // And the panel shows the passages rather than the books, because a
+        // reader who has typed a query is looking for a passage. Asked of the
+        // shell the way the sidebar asks it.
+        let panel = pedro.panel();
+        let rows: Vec<&str> = panel
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .map(|entry| entry.id.as_ref())
+            .collect();
+
+        assert!(!rows.is_empty(), "the sidebar went blank");
+        assert!(
+            rows.iter().all(|id| id.starts_with("hit:")),
+            "the sidebar is still listing books: {rows:?}"
+        );
+        let _ = cx;
     });
 }
