@@ -27,3 +27,10 @@ tracing-subscriber.workspace = true
 futures = "0.3"
 image = "0.25"
 time = "0.3"
+
+[dev-dependencies]
+# The headless window harness: a real window, a real element tree, and clicks
+# and keystrokes that go through the same dispatch the reader's do.
+gpui = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+

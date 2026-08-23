@@ -349,6 +349,32 @@ Line Tools alone. `pedro-app` needs a full Xcode install, because GPUI compiles
 Metal shaders with `xcrun metal` during its build (see the README). Steps 1–6
 are therefore verified as they land; step 7 waits for Xcode.
 
+### Driving the application itself
+
+gpui opens a headless window in tests, with a real element tree, and delivers
+clicks and keystrokes through the same dispatch a reader's go through. So the
+shell is tested the way it is used: a real SQLite library in a temporary
+directory, real PDFs that pdfium really reads, a stand-in CLI that prints
+recorded JSONL, and ⌘⇧S pressed rather than called.
+
+What it cannot do is look. It says which page the reader is on, which pages
+share a row, and what a citation resolved to — not whether the result is
+legible. Everything in this port that was wrong in a way a test could not see
+was found by running the application and reading its log.
+
+Two bugs turned up in the first hour of having it, both of which had been in
+every build the reader had used:
+
+- **No key did anything until the reader clicked something.** Keys are
+  dispatched along the focus path, and nothing claimed focus when the window
+  opened — and the key that focuses the search field is itself a key, so it
+  could not be what started them off. The shell now takes focus as the window
+  opens.
+- **Reopening a book in the same session forgot where the reader was.** The
+  place was written to the database and not to the list of books the shell
+  holds, and reopening reads that list. It was restored on the next launch,
+  which is what made it look like it worked.
+
 Nothing in the test suite needs an agent CLI or a network: runs are exercised
 against a stand-in that prints recorded JSONL, and the recordings are taken
 from the installed `claude` and `codex` rather than written from memory.
