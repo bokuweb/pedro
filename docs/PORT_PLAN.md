@@ -354,6 +354,30 @@ each shaped the design:
   them on the way to the screen, so bounds taken during layout are in neither
   the space the mouse is reported in nor the space the page is drawn in.
 
+### One connection, one mutex, and the things that must not hold it
+
+The store is a single SQLite connection behind a mutex, which is the right shape
+for a reader with one window — and it means anything slow that holds it stops
+everything else that needs it.
+
+Two things were slow enough to matter, and both were found the same way: by
+timing the log rather than by reading the code.
+
+- **Indexing at startup** held the store for five and a half seconds while it
+  cut and embedded eighteen hundred passages. Opening a book needs the same
+  store to find the file, so the reader watched a spinner for all of it. The
+  cutting and the embedding touch no database; they now happen with nothing
+  held, and the store is taken only to read the list and to write each book.
+  The book opens in a quarter of a second.
+- **Adding a book** did the same indexing inline. It now adds the book and
+  indexes afterwards, so a five-hundred-page book is in the library at once and
+  searchable a few seconds later.
+
+The rule this leaves is worth stating: *what holds the store must be a query*.
+Anything that thinks — embedding, rasterising, waiting on an agent — reads what
+it needs, lets go, and comes back to write. The chat already worked this way,
+for the same reason and after the same symptom.
+
 ## Deliberately not ported
 
 - **Login and sessions.** No `AUTH_*`, no cookies, no revocation story.

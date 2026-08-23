@@ -12,6 +12,7 @@
 //!   zeroes says less than no column at all.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use pedro_pdf::{Document, OutlineItem, PdfError};
 use pedro_search::index;
@@ -67,7 +68,7 @@ pub struct Store {
     ///
     /// Optional on purpose: everything works without it, and searching by
     /// meaning is what it adds. See `scripts/fetch-embedding.sh`.
-    embedder: Option<pedro_search::Embedder>,
+    embedder: Option<Arc<pedro_search::Embedder>>,
 }
 
 /// How many passages a search returns before anyone asks for fewer.
@@ -103,7 +104,7 @@ impl Store {
 
         migrate(&mut connection)?;
 
-        let embedder = pedro_search::Embedder::find();
+        let embedder = pedro_search::Embedder::find().map(Arc::new);
         if let Some(embedder) = &embedder {
             index::create_vectors(&connection, embedder.dimensions())?;
         }
@@ -136,6 +137,24 @@ impl Store {
         self.path_for_hash(&book.file_hash)
     }
 
+    /// Adds a PDF to the library and indexes it.
+    ///
+    /// Indexed here so that a book is searchable before it is opened: a reader
+    /// who adds a book and asks where something is in it should not have to
+    /// open it first.
+    ///
+    /// Indexing is the slow half — about five seconds for a five-hundred-page
+    /// book — and it happens with the store held. A caller that cannot afford
+    /// to hold it that long adds with [`Store::add_document_unindexed`] and
+    /// indexes afterwards, which is what the reader does.
+    pub fn add_document(&mut self, source: &Path) -> Result<Book, StoreError> {
+        let book = self.add_document_unindexed(source)?;
+        let full_text = self.full_text(&book.id)?;
+        self.index_book(&book.id, &full_text)?;
+
+        Ok(book)
+    }
+
     /// Adds a PDF to the library, or hands back the book it already is.
     ///
     /// Identity is the file's content. Adding the same bytes again keeps the
@@ -144,7 +163,7 @@ impl Store {
     /// a better name renames it.
     ///
     /// Reads the whole document, so this belongs on a background thread.
-    pub fn add_document(&mut self, source: &Path) -> Result<Book, StoreError> {
+    pub fn add_document_unindexed(&mut self, source: &Path) -> Result<Book, StoreError> {
         let bytes = std::fs::read(source)?;
         let file_hash = hash_of(&bytes);
         let file_name = source
@@ -198,30 +217,68 @@ impl Store {
     /// Reading a book is what costs; this is a few thousand rows and one
     /// transaction, so it happens on the same thread that just read the book.
     pub fn index_book(&mut self, book_id: &str, full_text: &str) -> Result<(), StoreError> {
-        let chunks = pedro_search::chunk::split(full_text, crate::excerpt::PAGE_DELIMITER);
-        let ids = index::index_book(&mut self.connection, book_id, &chunks)?;
+        let prepared = cut_and_embed(full_text, self.embedder.as_deref());
 
-        // The words are indexed whatever happens; the meanings only when the
-        // model to read them with is present.
-        let embedded = match &self.embedder {
-            Some(embedder) => {
-                let texts: Vec<String> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
-                match embedder.embed_all(&texts) {
-                    Ok(vectors) => {
-                        index::index_vectors(&mut self.connection, &ids, &vectors)?;
-                        true
-                    }
-                    Err(err) => {
-                        tracing::warn!(?err, book_id, "could not embed a book");
-                        false
-                    }
-                }
-            }
-            None => false,
-        };
+        self.write_index(book_id, &prepared)
+    }
 
-        tracing::info!(book_id, passages = chunks.len(), embedded, "indexed a book");
+    /// Writes a book's passages and their vectors.
+    ///
+    /// The cutting and the embedding happen in [`cut_and_embed`], which touches
+    /// no store: embedding eighteen hundred passages takes five seconds, and a
+    /// store held for five seconds is a reader who cannot open a book for five
+    /// seconds — the connection is one mutex, and opening a book needs it to
+    /// find the file.
+    pub fn write_index(
+        &mut self,
+        book_id: &str,
+        prepared: &PreparedIndex,
+    ) -> Result<(), StoreError> {
+        let ids = index::index_book(&mut self.connection, book_id, &prepared.chunks)?;
+
+        if let Some(vectors) = &prepared.vectors {
+            index::index_vectors(&mut self.connection, &ids, vectors)?;
+        }
+
+        tracing::info!(
+            book_id,
+            passages = prepared.chunks.len(),
+            embedded = prepared.vectors.is_some(),
+            "indexed a book"
+        );
+
         Ok(())
+    }
+
+    /// The books whose passages are not indexed, and the text to index them
+    /// from.
+    ///
+    /// Read in one pass so the caller can let go of the store while it does the
+    /// slow half. See [`Store::write_index`].
+    pub fn awaiting_index(&self) -> Result<Vec<Unindexed>, StoreError> {
+        let embedder = self.embedder.is_some();
+        let mut waiting = Vec::new();
+
+        for book in self.books()? {
+            let words = index::is_indexed(&self.connection, &book.id)?;
+            let meanings = index::has_vectors_for(&self.connection, &book.id)?;
+
+            if words && (meanings || !embedder) {
+                continue;
+            }
+
+            waiting.push(Unindexed {
+                full_text: self.full_text(&book.id)?,
+                book_id: book.id,
+            });
+        }
+
+        Ok(waiting)
+    }
+
+    /// The model, for work that should happen without holding the store.
+    pub fn embedder(&self) -> Option<Arc<pedro_search::Embedder>> {
+        self.embedder.clone()
     }
 
     /// Indexes the books added before there was an index to put them in.
@@ -235,24 +292,15 @@ impl Store {
     /// second test those books would keep their keyword search and never gain
     /// the other kind, with nothing on screen to say why.
     pub fn index_missing(&mut self) -> Result<usize, StoreError> {
-        let books = self.books()?;
-        let embedder = self.embedder.is_some();
-        let mut done = 0;
+        let waiting = self.awaiting_index()?;
+        let embedder = self.embedder.clone();
 
-        for book in books {
-            let words = index::is_indexed(&self.connection, &book.id)?;
-            let meanings = index::has_vectors_for(&self.connection, &book.id)?;
-
-            if words && (meanings || !embedder) {
-                continue;
-            }
-
-            let full_text = self.full_text(&book.id)?;
-            self.index_book(&book.id, &full_text)?;
-            done += 1;
+        for book in &waiting {
+            let prepared = cut_and_embed(&book.full_text, embedder.as_deref());
+            self.write_index(&book.book_id, &prepared)?;
         }
 
-        Ok(done)
+        Ok(waiting.len())
     }
 
     /// The passages matching `query`, across every book, best first.
@@ -877,6 +925,43 @@ fn hash_of(bytes: &[u8]) -> String {
 }
 
 /// Where the platform keeps application data, plus pedro's own directory.
+/// A book that needs indexing, and the text to index it from.
+pub struct Unindexed {
+    pub book_id: String,
+    pub full_text: String,
+}
+
+/// A book's passages, ready to be written.
+pub struct PreparedIndex {
+    pub chunks: Vec<pedro_search::chunk::Chunk>,
+    /// One vector per chunk, or `None` when there is no model to make them
+    /// with — the words are indexed either way.
+    pub vectors: Option<Vec<Vec<f32>>>,
+}
+
+/// Cuts a book into passages and embeds them. Touches no store.
+///
+/// The slow half of indexing, kept where a caller can do it without holding
+/// anything: eighteen hundred passages take about five seconds to embed, and
+/// the reader cannot open a book while the store is held.
+pub fn cut_and_embed(full_text: &str, embedder: Option<&pedro_search::Embedder>) -> PreparedIndex {
+    let chunks = pedro_search::chunk::split(full_text, crate::excerpt::PAGE_DELIMITER);
+
+    let vectors = embedder.and_then(|embedder| {
+        let texts: Vec<String> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
+
+        match embedder.embed_all(&texts) {
+            Ok(vectors) => Some(vectors),
+            Err(err) => {
+                tracing::warn!(?err, "could not embed a book");
+                None
+            }
+        }
+    });
+
+    PreparedIndex { chunks, vectors }
+}
+
 /// Where the library lives.
 ///
 /// `PEDRO_LIBRARY_PATH` names another one, the way `PEDRO_PDFIUM_PATH` and
