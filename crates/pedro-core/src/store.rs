@@ -1143,7 +1143,7 @@ BEGIN;
 
 ALTER TABLE folders ADD COLUMN parent_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
 
-CREATE INDEX folders_by_parent ON folders(parent_id);
+CREATE INDEX IF NOT EXISTS folders_by_parent ON folders(parent_id);
 
 COMMIT;
 "#;
@@ -1189,13 +1189,36 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         connection.pragma_update(None, "user_version", 4)?;
     }
 
-    if version < 5 {
-        // Shelves learned to stand on one another. Existing ones stay where
-        // they are: a null parent is the top level, which is where every shelf
-        // made before this was.
+    // Shelves learned to stand on one another. Existing ones stay where they
+    // are: a null parent is the top level, which is where every shelf made
+    // before this was.
+    //
+    // Asked of the table rather than of `user_version`, which is a single
+    // number shared by every line of work in this repository: a library opened
+    // by a build from another branch can already be at this version without
+    // ever having seen this column, and a migration that trusts the number
+    // then leaves the library unreadable by this one.
+    if !has_column(connection, "folders", "parent_id")? {
         connection.execute_batch(NESTED_SHELVES)?;
+    }
+
+    if version < 5 {
         connection.pragma_update(None, "user_version", 5)?;
     }
 
     Ok(())
+}
+
+/// Whether a table already has a column, as SQLite itself describes it.
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut columns = statement.query([])?;
+
+    while let Some(row) = columns.next()? {
+        if row.get::<_, String>("name")? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }

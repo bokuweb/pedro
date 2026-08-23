@@ -513,6 +513,44 @@ fn a_shelf_counts_the_books_on_it() {
     assert_eq!(book.folder_id, Some(shelf.id));
 }
 
+/// `user_version` is one number shared by every line of work in this
+/// repository, so a library can arrive at this version through somebody else's
+/// migration and never have been given this column. The migration asks the
+/// table rather than the number, and this is that: a library stamped with the
+/// version but missing the column still opens, and still nests.
+#[test]
+fn a_library_stamped_with_this_version_still_gets_the_column() {
+    let (store, root) = library("shelf-migration");
+    drop(store);
+
+    // Exactly the state another branch's migration leaves behind: the version
+    // this one writes, without the column this one adds.
+    let connection = rusqlite::Connection::open(root.join("pedro.sqlite3")).expect("the library");
+    connection
+        .execute_batch("DROP INDEX folders_by_parent; ALTER TABLE folders DROP COLUMN parent_id")
+        .expect("a droppable column");
+    connection
+        .pragma_update(None, "user_version", 5)
+        .expect("a version");
+    drop(connection);
+
+    let store = Store::open(&root).expect("a library that opens anyway");
+    assert!(store.folders().expect("a query").is_empty());
+
+    let top = store.create_folder("一", None).expect("a shelf");
+    let inside = store
+        .create_folder("二", Some(&top.id))
+        .expect("a shelf on a shelf");
+    assert_eq!(
+        store
+            .folder(&inside.id)
+            .expect("a query")
+            .expect("it")
+            .parent_id,
+        Some(top.id)
+    );
+}
+
 /// A shelf stands on another shelf, and a question to the one underneath is
 /// answered from everything above it.
 #[test]
