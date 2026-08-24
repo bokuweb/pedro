@@ -22,8 +22,8 @@ use gpui_component::input::{Backspace, Enter};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::{
-    FocusSearch, NextPage, NextTab, Pedro, PreviousPage, PreviousTab, ToggleChat, ToggleSidebar,
-    ToggleSpread, ZoomIn, ZoomOut, ZoomReset,
+    FirstPage, FocusSearch, LastPage, NextPage, NextTab, Pedro, PreviousPage, PreviousTab,
+    ToggleChat, ToggleSidebar, ToggleSpread, ZoomIn, ZoomOut, ZoomReset,
 };
 
 fn main() {
@@ -86,6 +86,34 @@ pub(crate) fn install(cx: &mut App) {
         // while the reader is typing a question.
         KeyBinding::new("right", NextPage, Some("Pedro")),
         KeyBinding::new("left", PreviousPage, Some("Pedro")),
+        KeyBinding::new("down", NextPage, Some("Pedro")),
+        KeyBinding::new("up", PreviousPage, Some("Pedro")),
+        KeyBinding::new("home", FirstPage, Some("Pedro")),
+        KeyBinding::new("end", LastPage, Some("Pedro")),
+        // The keys a reader who lives in vim reaches for, and the ones a
+        // reader who lives in emacs does.
+        //
+        // Bound away from the text field by name, not by depth. A binding in an
+        // ancestor context fires whenever nothing deeper claims the key, and a
+        // text field claims no plain letters — so `j` bound on the shell alone
+        // ate the j out of every question typed into it. `!Input` is what keeps
+        // a `j` a `j`.
+        //
+        // Not modes, and nothing to turn on. A reader who wants neither presses
+        // the arrows, which are still there, and never meets these by accident:
+        // reading is the only place they do anything.
+        KeyBinding::new("j", NextPage, Some("Pedro && !Input")),
+        KeyBinding::new("k", PreviousPage, Some("Pedro && !Input")),
+        KeyBinding::new("g g", FirstPage, Some("Pedro && !Input")),
+        KeyBinding::new("shift-g", LastPage, Some("Pedro && !Input")),
+        KeyBinding::new("/", FocusSearch, Some("Pedro && !Input")),
+        KeyBinding::new("ctrl-n", NextPage, Some("Pedro && !Input")),
+        KeyBinding::new("ctrl-p", PreviousPage, Some("Pedro && !Input")),
+        KeyBinding::new("ctrl-v", NextPage, Some("Pedro && !Input")),
+        KeyBinding::new("alt-v", PreviousPage, Some("Pedro && !Input")),
+        KeyBinding::new("alt-shift-,", FirstPage, Some("Pedro && !Input")),
+        KeyBinding::new("alt-shift-.", LastPage, Some("Pedro && !Input")),
+        KeyBinding::new("ctrl-s", FocusSearch, Some("Pedro && !Input")),
         // Both spellings of the same key: the plus is a shifted equals
         // on most layouts, and readers press whichever they think of.
         KeyBinding::new("cmd-=", ZoomIn, None),

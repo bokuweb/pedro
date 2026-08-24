@@ -324,7 +324,7 @@ Each step leaves the workspace building and tested.
 9. ✅ **`pedro-app`** — the screens: library, reader with real pages in a
    continuous scroll, selection and highlights, chat panel with streaming and
    citations, contents, settings, and the keys for turning and zooming. Vim and
-   Emacs bindings are the part of step 7 still open.
+   Every part of step 7 is now done.
 
 Steps 1–6 have no GPUI dependency. The workspace is covered by 173 tests, all of
 which run without an agent CLI, a network, or a window.
@@ -396,6 +396,18 @@ Line Tools alone. `pedro-app` needs a full Xcode install, because GPUI compiles
 Metal shaders with `xcrun metal` during its build (see the README). Steps 1–6
 are therefore verified as they land; step 7 waits for Xcode.
 
+### Vim and Emacs keys, and what binding a letter costs
+
+`j` `k` `gg` `G` `/`, and `C-n` `C-p` `C-v` `M-v` `M-<` `M->` `C-s`. Not modes,
+and nothing to turn on: a reader who wants neither presses the arrows, which are
+still there.
+
+Bound away from the text field **by name**, not by depth. A binding in an
+ancestor context fires whenever nothing deeper claims the key, and a text field
+claims no plain letters — so `j` bound on the shell alone ate the j out of every
+question typed into it. `Pedro && !Input` is what keeps a `j` a `j`, and there
+is a test that types "just checking" and reads it back.
+
 ### Driving the application itself
 
 gpui opens a headless window in tests, with a real element tree, and delivers
@@ -409,8 +421,8 @@ share a row, and what a citation resolved to — not whether the result is
 legible. Everything in this port that was wrong in a way a test could not see
 was found by running the application and reading its log.
 
-Two bugs turned up in the first hour of having it, both of which had been in
-every build the reader had used:
+Four bugs have turned up in it so far, all of which had been in every build the
+reader had used:
 
 - **No key did anything until the reader clicked something.** Keys are
   dispatched along the focus path, and nothing claimed focus when the window
@@ -421,6 +433,17 @@ every build the reader had used:
   place was written to the database and not to the list of books the shell
   holds, and reopening reads that list. It was restored on the next launch,
   which is what made it look like it worked.
+- **The reader was on two pages at once, every frame.** The scrolling list asks
+  for rows twice a frame and means different things by it: once for the rows it
+  is about to draw, and once for a single row at the top, only to find out how
+  tall a row is. Taking the reader's place from both wrote two different pages
+  to the database every frame and left the page in the status strip flickering.
+- **And the first page of the book was drawn and thrown away, forever.** That
+  same measuring call asked pdfium for page one, which does not survive being
+  filed when the reader is elsewhere — `store` keeps only the pages around them.
+  So it was drawn, discarded, and drawn again for as long as the reader sat
+  anywhere but the beginning: sixty-four thousand times in the minute it took to
+  find. The test hung rather than failed, which is how it was noticed at all.
 
 Nothing in the test suite needs an agent CLI or a network: runs are exercised
 against a stand-in that prints recorded JSONL, and the recordings are taken
