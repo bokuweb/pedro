@@ -456,6 +456,9 @@ fn render_citation(citation: Citation, cx: &mut Context<Pedro>) -> impl IntoElem
             "citation",
             citation.id.as_str().len() * 31 + jump.unwrap_or(0) as usize,
         ))
+        // Named so a test can find it and press it. Compiled away in a build
+        // that is not a test.
+        .debug_selector(|| format!("citation:{}", citation.id))
         .px(px(8.))
         .py(px(3.))
         .rounded(px(7.))

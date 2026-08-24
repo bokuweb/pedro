@@ -323,6 +323,10 @@ async fn a_question_about_a_passage_is_answered_and_its_source_resolved(cx: &mut
         // The panel is still in tow, because the reader never left the foot.
         assert!(pedro.chat_follows, "the answer was not being followed");
     });
+
+    // An answer is written frame by frame; when it is finished, that has to
+    // stop.
+    goes_quiet(cx, "an answer finishing");
 }
 
 /// A shelf is made, a book is put on it, and the sidebar says so.
@@ -597,6 +601,20 @@ async fn vim_keys_turn_the_pages(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("home");
     cx.run_until_parked();
     assert_eq!(page(&pedro, cx), 1, "home did not go back to the start");
+
+    // A chord: g and then g, which is one binding rather than two. The first g
+    // does nothing on its own, and must not.
+    cx.simulate_keystrokes("shift-g");
+    cx.run_until_parked();
+    assert!(page(&pedro, cx) >= 7);
+
+    cx.simulate_keystrokes("g");
+    cx.run_until_parked();
+    assert!(page(&pedro, cx) >= 7, "a lone g moved the reader");
+
+    cx.simulate_keystrokes("g");
+    cx.run_until_parked();
+    assert_eq!(page(&pedro, cx), 1, "gg did not go back to the start");
 }
 
 /// And the ones a reader who lives in emacs does.
@@ -647,4 +665,219 @@ async fn a_j_typed_into_a_question_is_a_j(cx: &mut TestAppContext) {
     pedro.read_with(cx, |pedro, cx| {
         assert_eq!(pedro.composer.read(cx).value(), "just checking");
     });
+}
+
+/// Two books, two tabs, and the keys that move between them.
+#[gpui::test]
+async fn tabs_hold_a_book_each(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "tabs",
+        &[("one.pdf", a_book("one", 4)), ("two.pdf", a_book("two", 4))],
+    );
+    let (pedro, cx) = reader.open(cx);
+
+    let books: Vec<String> = pedro.read_with(cx, |pedro, _| {
+        pedro
+            .library
+            .books()
+            .iter()
+            .map(|book| book.id.clone())
+            .collect()
+    });
+
+    for book in &books {
+        pedro.update_in(cx, |pedro, _, cx| pedro.open_book_tab(book, cx));
+        cx.run_until_parked();
+    }
+
+    let open_tabs = pedro.read_with(cx, |pedro, _| pedro.tabs.len());
+    assert_eq!(open_tabs, 2, "the second book did not get a tab of its own");
+
+    let showing = |pedro: &gpui::Entity<Pedro>, cx: &mut VisualTestContext| {
+        pedro.read_with(cx, |pedro, _| {
+            pedro.active_tab().expect("a tab").id.to_string()
+        })
+    };
+    let second = showing(&pedro, cx);
+
+    cx.simulate_keystrokes("cmd-shift-[");
+    cx.run_until_parked();
+    let first = showing(&pedro, cx);
+    assert_ne!(first, second, "the tab did not change");
+
+    cx.simulate_keystrokes("cmd-shift-]");
+    cx.run_until_parked();
+    assert_eq!(showing(&pedro, cx), second, "it did not come back");
+
+    // Each tab keeps its own place, which is the reason they are tabs.
+    pedro.update_in(cx, |pedro, _, cx| pedro.turn_page(2, cx));
+    cx.run_until_parked();
+    let turned = page(&pedro, cx);
+    assert!(turned > 1);
+
+    cx.simulate_keystrokes("cmd-shift-[");
+    cx.run_until_parked();
+    assert_eq!(page(&pedro, cx), 1, "the other tab moved too");
+
+    cx.simulate_keystrokes("cmd-shift-]");
+    cx.run_until_parked();
+    assert_eq!(page(&pedro, cx), turned, "the tab lost its place");
+
+    // And closing one leaves the other.
+    pedro.update_in(cx, |pedro, _, cx| pedro.close_tab(1, cx));
+    cx.run_until_parked();
+    assert_eq!(pedro.read_with(cx, |pedro, _| pedro.tabs.len()), 1);
+}
+
+/// Dragging across a page marks the words under the drag.
+///
+/// Through the mouse rather than through the selection methods: where a page
+/// was drawn, and whether a press at a window coordinate lands on the right
+/// characters of it, is the whole of what has ever gone wrong here.
+#[gpui::test]
+async fn dragging_across_a_page_marks_what_is_under_it(cx: &mut TestAppContext) {
+    let (_reader, pedro, cx) = reading_a_book("selecting", 4, cx).await;
+
+    // A frame, so the pages record where they were drawn.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let drawn = pedro.read_with(cx, |pedro, _| pedro.page_bounds.borrow().get(&1).copied());
+    let Some(bounds) = drawn else {
+        panic!("page 1 never said where it was drawn");
+    };
+
+    // Across the middle of the page, where the fixture puts its text.
+    let left = bounds.origin.x + bounds.size.width * 0.05;
+    let right = bounds.origin.x + bounds.size.width * 0.95;
+    let middle = bounds.origin.y + bounds.size.height * 0.5;
+
+    cx.simulate_mouse_move(gpui::point(left, middle), None, gpui::Modifiers::default());
+    cx.simulate_mouse_down(
+        gpui::point(left, middle),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_move(
+        gpui::point(right, middle),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        gpui::point(right, middle),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    pedro.read_with(cx, |pedro, _| {
+        let marked = &pedro.attached;
+        assert_eq!(marked.len(), 1, "the drag marked nothing");
+        assert_eq!(marked[0].page_number, 1);
+        assert!(
+            marked[0].selected_text.contains("one"),
+            "the drag marked the wrong words: {:?}",
+            marked[0].selected_text
+        );
+        assert!(!marked[0].rects.is_empty(), "the mark has nothing to draw");
+    });
+}
+
+/// The whole point of a citation: pressing it takes the reader to the page the
+/// passage is on.
+#[gpui::test]
+async fn pressing_a_citation_turns_to_its_page(cx: &mut TestAppContext) {
+    let (_reader, pedro, cx) = reading_a_book("citing", 6, cx).await;
+
+    let answer = "It is on the third page[1].\n\n## Sources\n[1] \"one page 3\"";
+    pedro.update_in(cx, |pedro, _, _| {
+        pedro.agent_status = AgentStatus::Done(vec![DiscoveredAgent {
+            kind: AgentKind::ClaudeCode,
+            program: a_cli_answering("e2e-citing", answer),
+            version: None,
+        }]);
+        pedro.attached = vec![NewHighlight {
+            selected_text: "one page 1".to_owned(),
+            page_number: 1,
+            rects: Vec::new(),
+        }];
+    });
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro.composer.update(cx, |composer, cx| {
+            composer.focus(window, cx);
+        });
+    });
+    cx.simulate_input("where?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    written_out(&pedro, cx);
+
+    assert_eq!(page(&pedro, cx), 1, "the reader has already moved");
+
+    // A frame, so the badge is drawn and says where it is.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let Some(badge) = cx.debug_bounds("citation:1") else {
+        panic!("the citation was not drawn");
+    };
+
+    cx.simulate_click(badge.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(
+        page(&pedro, cx),
+        3,
+        "pressing the citation did not turn to its page"
+    );
+}
+
+/// Asserts the application has nothing left to do.
+///
+/// A window that never runs out of work is the kind of fault nothing on screen
+/// reveals: no wrong pixel, no wrong number, just a core spinning and a battery
+/// going down. It cost this reader sixty-four thousand redraws a minute before a
+/// test noticed, and it noticed by hanging rather than by failing. This says it
+/// out loud instead.
+fn goes_quiet(cx: &mut VisualTestContext, after: &str) {
+    cx.run_until_parked();
+
+    for _ in 0..QUIET_ENOUGH {
+        if cx.executor().tick() {
+            panic!("the window still had work to do after {after}");
+        }
+    }
+}
+
+/// Enough ticks that a loop of a few frames' period is caught, few enough that
+/// the test stays quick.
+const QUIET_ENOUGH: usize = 32;
+
+/// Every ordinary thing a reader does, and then nothing.
+#[gpui::test]
+async fn the_window_goes_to_sleep(cx: &mut TestAppContext) {
+    let (_reader, pedro, cx) = reading_a_book("quiet", 8, cx).await;
+    goes_quiet(cx, "opening a book");
+
+    cx.simulate_keystrokes("j");
+    goes_quiet(cx, "turning a page");
+
+    cx.simulate_keystrokes("shift-g");
+    goes_quiet(cx, "going to the end");
+
+    cx.simulate_keystrokes("home");
+    goes_quiet(cx, "going back to the start");
+
+    cx.simulate_keystrokes("cmd-shift-s");
+    goes_quiet(cx, "asking for two pages at once");
+
+    cx.simulate_keystrokes("cmd-b");
+    goes_quiet(cx, "folding the sidebar away");
+
+    cx.simulate_keystrokes("cmd-alt-b");
+    goes_quiet(cx, "opening the conversation panel");
+
+    // And still nothing, with a book open and everything moved.
+    let _ = pedro;
 }

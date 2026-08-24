@@ -421,7 +421,7 @@ share a row, and what a citation resolved to — not whether the result is
 legible. Everything in this port that was wrong in a way a test could not see
 was found by running the application and reading its log.
 
-Four bugs have turned up in it so far, all of which had been in every build the
+Six bugs have turned up in it so far, all of which had been in every build the
 reader had used:
 
 - **No key did anything until the reader clicked something.** Keys are
@@ -444,6 +444,21 @@ reader had used:
   So it was drawn, discarded, and drawn again for as long as the reader sat
   anywhere but the beginning: sixty-four thousand times in the minute it took to
   find. The test hung rather than failed, which is how it was noticed at all.
+- **A `j` typed into a question was eaten.** A binding in an ancestor context
+  fires whenever nothing deeper claims the key, and a text field claims no plain
+  letters, so `j` and `k` never reached the composer. "just checking" came out
+  as "ust checing".
+- **An answer could be written where the reader could not see it.** The
+  conversation panel opens when a marked passage is reopened, and did not open
+  when a question was asked — so asking with it shut, which is the state a
+  reader who has never opened it is in, streamed the answer into a panel that
+  was not on screen.
+
+The first of those cost a core and the last cost the answer, and neither shows
+up as a wrong pixel. That is what this harness is for, and why one of its tests
+asserts only that the window **runs out of work**: `goes_quiet` ticks the
+executor after every ordinary action and fails if anything is still scheduled.
+The rasterisation loop would have been a failing assertion rather than a hang.
 
 Nothing in the test suite needs an agent CLI or a network: runs are exercised
 against a stand-in that prints recorded JSONL, and the recordings are taken
