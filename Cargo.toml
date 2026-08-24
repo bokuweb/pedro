@@ -4,6 +4,7 @@ members = [
     "crates/pedro-app",
     "crates/pedro-core",
     "crates/pedro-drive",
+    "crates/pedro-mcp",
     "crates/pedro-pdf",
     "crates/pedro-search",
 ]
