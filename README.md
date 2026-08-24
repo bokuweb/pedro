@@ -45,6 +45,7 @@ and the answer arrives beside the page with sources that turn back to it.
 | Vim and Emacs key bindings | Done |
 | Two-page spreads | Done |
 | Reading a PDF out of Google Drive | Done |
+| Serving the library to other agents over MCP | Done |
 
 ## Layout
 
@@ -52,8 +53,10 @@ and the answer arrives beside the page with sources that turn back to it.
 crates/
   pedro-agent   Finding the installed agent CLIs, and running one.
   pedro-pdf     Pages, text with per-character boxes, outlines. pdfium.
+  pedro-search  The index: chunks, words (FTS5) and meanings (vectors).
   pedro-core    The domain: library, excerpts, prompts, citations, chat.
   pedro-drive   Fetching a PDF out of Google Drive. The only remote piece.
+  pedro-mcp     The library, served to other agents over MCP.
   pedro-app     The GPUI application.
 ```
 
@@ -83,7 +86,7 @@ chatbook's real thinking is — be covered by tests that run without a window.
   ```
 
   Without it `cargo build -p pedro-app` fails with `unable to find utility
-  "metal"`. The other three crates build and test without Xcode.
+  "metal"`. Every other crate builds and tests without Xcode.
 
 - At least one agent CLI installed and authenticated (`claude` or `codex`).
 
@@ -177,6 +180,58 @@ Check CLI discovery on its own:
 ```bash
 cargo run -p pedro-agent --example detect
 ```
+
+## As an MCP server
+
+pedro borrows a coding agent's credentials to answer a question about a book.
+The same relationship runs the other way round: `pedro-mcp` serves the library
+to a coding agent over MCP, so an agent working on your code can search the
+documents you actually read and quote the page it found them on.
+
+```bash
+cargo build --release -p pedro-mcp
+claude mcp add pedro -- "$PWD/target/release/pedro-mcp"
+```
+
+It takes no arguments and no environment, so anything configured from a file
+wants only the path:
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.pedro]
+command = "/absolute/path/to/pedro-mcp"
+```
+
+| Tool | |
+| --- | --- |
+| `list_books` | What is in the library, which shelf each book is on, and the id the other tools take |
+| `search_library` | The passages bearing on a query, best first, each naming its page |
+| `read_pages` | A range of pages, verbatim |
+| `book_contents` | The book's own chapters, and where each one starts |
+| `add_book` | A PDF on this machine, added and indexed |
+
+The same index the reader's search box uses: the words, and — once
+`scripts/fetch-embedding.sh` has been run — what they mean, the two rankings
+fused. Hits are numbered rather than scored, because a fused score is a rank
+wearing a number and a model shown `0.03` would read a good hit as a bad one.
+
+It opens the same SQLite database the reader does, in WAL mode, so both can be
+open at once and a book added in one is there in the other. Nothing but
+`add_book` needs pdfium: the pages come from text already extracted into the
+library.
+
+There is deliberately no tool for asking a question. pedro answers questions by
+handing a passage to an agent CLI, and whatever is calling these tools is
+already that agent — what it wants from pedro is the retrieval, not a second
+opinion from a second model one step further away from it. Nor is there one for
+removing a book: adding one costs a file and is undone in the reader, while
+deleting takes highlights and conversations with it.
+
+Books added before the embedding model was fetched are found by their words
+alone until they are indexed again. The reader does that at startup, and so
+does `cargo run -p pedro-core --example reindex`; `pedro-mcp` does not, because
+a client gives a server it has just started seconds to answer and a shelf of
+books takes longer than that.
 
 ## Where things are kept
 

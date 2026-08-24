@@ -4565,6 +4565,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pedro-mcp"
+version = "0.1.0"
+dependencies = [
+ "pedro-core",
+ "pedro-pdf",
+ "pedro-search",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pedro-pdf"
 version = "0.1.0"
 dependencies = [
