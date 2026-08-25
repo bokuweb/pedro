@@ -290,3 +290,14 @@ cargo test --workspace --exclude pedro-app
 instructions rather than skipping when it is missing. Nothing needs an agent
 CLI: runs are tested against a stand-in that prints recorded JSONL, so a
 credential-less machine still covers streaming, refusals and cancellation.
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify and
+share for any noncommercial purpose, including personal projects, research and
+education. Commercial use is not granted by this license; ask if you want it.
+
+Required Notice: Copyright 2026 bokuweb (https://github.com/bokuweb)
+
+Portions derived from [chatbook](https://github.com/skanehira/chatbook) remain
+under the MIT License, reproduced in [LICENSE](LICENSE).
