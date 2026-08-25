@@ -2008,8 +2008,11 @@ impl Pedro {
             .update(cx, |composer, cx| composer.set_value("", window, cx));
 
         // A reader who has just asked something wants to see it answered, from
-        // wherever they were reading.
+        // wherever they were reading — and in a panel that is open. Asking with
+        // it shut sent the answer somewhere they could not see, which is the
+        // state a reader who has never opened it is in.
         self.chat_follows = true;
+        self.show_chat(true, cx);
 
         let web_search = self.web_search;
         // Deltas arrive on the agent's thread and the view lives on this one,
