@@ -421,8 +421,8 @@ share a row, and what a citation resolved to — not whether the result is
 legible. Everything in this port that was wrong in a way a test could not see
 was found by running the application and reading its log.
 
-Six bugs have turned up in it so far, all of which had been in every build the
-reader had used:
+Seven bugs have turned up in it so far, all of which had been in every build
+the reader had used:
 
 - **No key did anything until the reader clicked something.** Keys are
   dispatched along the focus path, and nothing claimed focus when the window
@@ -454,8 +454,15 @@ reader had used:
   reader who has never opened it is in, streamed the answer into a panel that
   was not on screen.
 
-The first of those cost a core and the last cost the answer, and neither shows
-up as a wrong pixel. That is what this harness is for, and why one of its tests
+- **One page pdfium would not draw cost the whole book.** A page that failed to
+  render set the tab's error, which is what the reader is shown *instead of* the
+  document — so a five-hundred-page book with one bad page became an error
+  message. A page that cannot be drawn is now noted as such: the rest of the
+  book is still there, and it is not asked for again on every frame for as long
+  as the book is open.
+
+The first of those cost a core and the others cost the answer and the book, and
+none of them shows up as a wrong pixel. That is what this harness is for, and why one of its tests
 asserts only that the window **runs out of work**: `goes_quiet` ticks the
 executor after every ordinary action and fails if anything is still scheduled.
 The rasterisation loop would have been a failing assertion rather than a hang.

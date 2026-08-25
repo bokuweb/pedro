@@ -881,3 +881,142 @@ async fn the_window_goes_to_sleep(cx: &mut TestAppContext) {
     // And still nothing, with a book open and everything moved.
     let _ = pedro;
 }
+
+/// The same, around the shelves.
+#[gpui::test]
+async fn the_shelves_go_to_sleep_too(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "quiet-shelves",
+        &[("one.pdf", a_book("one", 4)), ("two.pdf", a_book("two", 4))],
+    );
+    let (pedro, cx) = reader.open(cx);
+    goes_quiet(cx, "opening a library");
+
+    let books: Vec<String> = pedro.read_with(cx, |pedro, _| {
+        pedro
+            .library
+            .books()
+            .iter()
+            .map(|book| book.id.clone())
+            .collect()
+    });
+
+    let shelf = pedro.update_in(cx, |pedro, window, cx| {
+        pedro.create_shelf(window, cx);
+        pedro.library.shelves()[0].id.clone()
+    });
+    goes_quiet(cx, "making a shelf");
+
+    for book in &books {
+        pedro.update_in(cx, |pedro, _, cx| pedro.shelve_book(book, Some(&shelf), cx));
+    }
+    goes_quiet(cx, "putting books on it");
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro.open_shelf(&shelf, "暗号", window, cx)
+    });
+    goes_quiet(cx, "opening a shelf");
+
+    pedro.update_in(cx, |pedro, _, cx| pedro.delete_shelf(&shelf, cx));
+    goes_quiet(cx, "throwing the shelf away");
+}
+
+/// And while the reader is searching, which redraws the sidebar on every
+/// keystroke.
+#[gpui::test]
+async fn searching_goes_to_sleep(cx: &mut TestAppContext) {
+    let reader = Reader::with(
+        "quiet-search",
+        &[("one.pdf", a_book("one", 4)), ("two.pdf", a_book("two", 4))],
+    );
+    let (pedro, cx) = reader.open(cx);
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro
+            .search
+            .update(cx, |search, cx| search.focus(window, cx));
+    });
+    cx.simulate_input("two page 3");
+    goes_quiet(cx, "searching");
+
+    pedro.update_in(cx, |pedro, window, cx| {
+        pedro
+            .search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+    });
+    goes_quiet(cx, "clearing the search");
+}
+
+/// And after the reader has marked a passage and changed the size of the page.
+#[gpui::test]
+async fn marking_and_zooming_go_to_sleep(cx: &mut TestAppContext) {
+    let (_reader, pedro, cx) = reading_a_book("quiet-marking", 6, cx).await;
+
+    cx.update(|window, _| window.refresh());
+    goes_quiet(cx, "settling");
+
+    let bounds = pedro
+        .read_with(cx, |pedro, _| pedro.page_bounds.borrow().get(&1).copied())
+        .expect("page 1 said where it was drawn");
+
+    let left = bounds.origin.x + bounds.size.width * 0.05;
+    let right = bounds.origin.x + bounds.size.width * 0.95;
+    let middle = bounds.origin.y + bounds.size.height * 0.5;
+
+    cx.simulate_mouse_down(
+        gpui::point(left, middle),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_move(
+        gpui::point(right, middle),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        gpui::point(right, middle),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    goes_quiet(cx, "marking a passage");
+
+    cx.simulate_keystrokes("cmd-=");
+    goes_quiet(cx, "drawing the pages larger");
+
+    cx.simulate_keystrokes("cmd-0");
+    goes_quiet(cx, "putting them back");
+}
+
+/// Resizing the window, which is where the layout changes its mind.
+///
+/// Two pages fit or they do not, and the answer changes as the window is
+/// dragged. An earlier version of that decision read a width that was
+/// momentarily nothing, so the book flipped between one page and two on every
+/// frame — resetting the list and losing the reader's place, forever.
+#[gpui::test]
+async fn resizing_goes_to_sleep(cx: &mut TestAppContext) {
+    let (_reader, pedro, cx) = reading_a_book("quiet-resize", 8, cx).await;
+
+    cx.simulate_keystrokes("cmd-shift-s");
+    goes_quiet(cx, "asking for two pages at once");
+
+    // Wide enough for two, then far too narrow, then back — across the width
+    // where the answer changes, in both directions.
+    for (width, height) in [
+        (1600., 900.),
+        (900., 900.),
+        (600., 900.),
+        (1600., 900.),
+        (500., 700.),
+    ] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+        goes_quiet(cx, &format!("resizing to {width} by {height}"));
+    }
+
+    // And the reader is still in the book, at a page it has.
+    let page = page(&pedro, cx);
+    assert!(
+        (1..=8).contains(&page),
+        "the resize lost the reader: {page}"
+    );
+}

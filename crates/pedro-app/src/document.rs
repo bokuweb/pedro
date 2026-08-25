@@ -132,6 +132,12 @@ pub struct OpenDocument {
     pub pages: HashMap<u32, Page>,
     /// The pages pdfium is working on, so the same one is not asked for twice.
     pub requested: HashSet<u32>,
+    /// The pages that came back unusable, so they are not asked for forever.
+    ///
+    /// Without this a page that cannot be drawn is asked for again on the very
+    /// next frame, and the answer is no again — which is not a blank page, it
+    /// is a core spinning for as long as the book is open.
+    pub unusable: HashSet<u32>,
     /// Bumped whenever the size a page is drawn at changes. Work already in
     /// flight was started for the old size, and is dropped when it lands rather
     /// than being drawn at a size it was not made for.
@@ -166,6 +172,7 @@ impl OpenDocument {
             rows,
             pages: HashMap::new(),
             requested: HashSet::new(),
+            unusable: HashSet::new(),
             generation: 0,
             selection: None,
             highlights: Vec::new(),
@@ -183,6 +190,7 @@ impl OpenDocument {
             && page <= self.page_count
             && !self.pages.contains_key(&page)
             && !self.requested.contains(&page)
+            && !self.unusable.contains(&page)
     }
 
     /// Throws away every page, because the size they were drawn for has
@@ -191,7 +199,17 @@ impl OpenDocument {
     pub fn resized(&mut self) {
         self.pages.clear();
         self.requested.clear();
+        // Given another chance at the new size: a page that could not be drawn
+        // one way may be drawable another, and the reader has just asked for
+        // something to change.
+        self.unusable.clear();
         self.generation += 1;
+    }
+
+    /// Notes that a page cannot be drawn, so it is not asked for again.
+    pub fn cannot_draw(&mut self, page: u32) {
+        self.requested.remove(&page);
+        self.unusable.insert(page);
     }
 
     /// Files a rasterised page, and forgets the ones the reader has left far
@@ -576,5 +594,53 @@ mod fitting {
     #[test]
     fn a_page_of_no_size_fills_what_it_is_given() {
         assert_eq!(fitted(sized(0., 0.), 640., 490.), (490., 640.));
+    }
+}
+
+#[cfg(test)]
+mod pages_that_will_not_draw {
+    use super::*;
+
+    /// A real document, because there is no making one without pdfium — and
+    /// the sizes it reports are the ones the layout is built from.
+    fn a_document() -> OpenDocument {
+        let path = std::env::temp_dir().join("pedro-app-unusable.pdf");
+        std::fs::write(
+            &path,
+            pedro_pdf::fixtures::pdf_with_pages(&["one", "two", "three", "four"]),
+        )
+        .expect("a writable file");
+
+        let document = Document::open(&path).expect("a readable pdf");
+        let size = document.page_size(0).expect("a size");
+        let sizes = document.page_sizes().expect("every size");
+
+        OpenDocument::new(document, size, sizes, 1, Layout::Single)
+    }
+
+    /// A page that cannot be drawn is not asked for again. Asking again gets
+    /// the same answer on every frame for as long as the book is open, which is
+    /// not a blank page but a core spinning.
+    #[test]
+    fn a_page_that_cannot_be_drawn_is_not_asked_for_again() {
+        let mut open = a_document();
+        assert!(open.wants(3));
+
+        open.cannot_draw(3);
+        assert!(!open.wants(3), "it would have been asked for again");
+
+        // And only that page.
+        assert!(open.wants(4));
+    }
+
+    /// Drawing at another size is another chance: the reader has just asked for
+    /// something to change.
+    #[test]
+    fn a_new_size_gives_every_page_another_chance() {
+        let mut open = a_document();
+        open.cannot_draw(3);
+
+        open.resized();
+        assert!(open.wants(3));
     }
 }
