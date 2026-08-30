@@ -1300,18 +1300,25 @@ impl Pedro {
         match rendered {
             Ok((image, text, _size)) => {
                 open.requested.remove(&page);
-                if let Some(image) = as_render_image(image) {
+                match as_render_image(image) {
                     // The size it came back at is not kept: every page's size
                     // was read from the page table when the book was opened,
                     // and a layout that waited for the pixels to learn a page's
                     // shape is a layout that moves while it is being read.
-                    open.store(page, Page { image, text });
+                    Some(image) => open.store(page, Page { image, text }),
+                    None => {
+                        tracing::error!(page, "a page came back in a shape gpui cannot draw");
+                        open.cannot_draw(page);
+                    }
                 }
             }
             Err(why) => {
-                open.requested.remove(&page);
+                // The page, not the book. `tab.error` is what the reader is
+                // shown instead of the whole document, and a document with one
+                // page pdfium will not draw is still four hundred pages they
+                // can read — losing all of them to one is the wrong trade.
                 tracing::error!(why, page, "could not render a page");
-                tab.error = Some(why.into());
+                open.cannot_draw(page);
             }
         }
 
