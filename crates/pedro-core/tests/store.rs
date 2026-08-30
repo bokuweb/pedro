@@ -486,7 +486,7 @@ fn books_stored_without_an_index_are_indexed_later() {
 #[test]
 fn a_shelf_counts_the_books_on_it() {
     let (mut store, root) = library("shelf-count");
-    let shelf = store.create_folder("あとで読む").expect("a shelf");
+    let shelf = store.create_folder("あとで読む", None).expect("a shelf");
     assert_eq!(shelf.book_count, 0);
 
     let one = store
@@ -517,12 +517,179 @@ fn a_shelf_counts_the_books_on_it() {
     assert_eq!(book.folder_id, Some(shelf.id));
 }
 
+/// `user_version` is one number shared by every line of work in this
+/// repository, so a library can arrive at this version through somebody else's
+/// migration and never have been given this column. The migration asks the
+/// table rather than the number, and this is that: a library stamped with the
+/// version but missing the column still opens, and still nests.
+#[test]
+fn a_library_stamped_with_this_version_still_gets_the_column() {
+    let (store, root) = library("shelf-migration");
+    drop(store);
+
+    // Exactly the state another branch's migration leaves behind: the version
+    // this one writes, without the column this one adds.
+    let connection = rusqlite::Connection::open(root.join("pedro.sqlite3")).expect("the library");
+    connection
+        .execute_batch("DROP INDEX folders_by_parent; ALTER TABLE folders DROP COLUMN parent_id")
+        .expect("a droppable column");
+    connection
+        .pragma_update(None, "user_version", 5)
+        .expect("a version");
+    drop(connection);
+
+    let store = Store::open(&root).expect("a library that opens anyway");
+    assert!(store.folders().expect("a query").is_empty());
+
+    let top = store.create_folder("一", None).expect("a shelf");
+    let inside = store
+        .create_folder("二", Some(&top.id))
+        .expect("a shelf on a shelf");
+    assert_eq!(
+        store
+            .folder(&inside.id)
+            .expect("a query")
+            .expect("it")
+            .parent_id,
+        Some(top.id)
+    );
+}
+
+/// A shelf stands on another shelf, and a question to the one underneath is
+/// answered from everything above it.
+#[test]
+fn a_shelf_counts_the_books_under_it() {
+    let (mut store, root) = library("shelf-nesting");
+    let subject = store.create_folder("暗号", None).expect("a shelf");
+    let inside = store
+        .create_folder("古典暗号", Some(&subject.id))
+        .expect("a shelf on a shelf");
+
+    let one = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+    let two = store
+        .add_document(&pdf(&root, "two.pdf", &["preface", "body"]))
+        .expect("a readable pdf");
+
+    store.move_book(&one.id, Some(&subject.id)).expect("a move");
+    store.move_book(&two.id, Some(&inside.id)).expect("a move");
+
+    let shelves = store.folders().expect("a query");
+    let top = shelves.iter().find(|it| it.id == subject.id).expect("it");
+    let under = shelves.iter().find(|it| it.id == inside.id).expect("it");
+
+    assert_eq!(under.parent_id, Some(subject.id.clone()));
+    assert_eq!(top.parent_id, None);
+
+    // Two for the shelf that carries both, one for the shelf inside it.
+    assert_eq!(top.book_count, 2);
+    assert_eq!(under.book_count, 1);
+
+    // Which is also the difference between what stands on a shelf and what a
+    // question to it reads.
+    assert_eq!(store.books_in(&subject.id).expect("a query").len(), 1);
+    assert_eq!(store.books_under(&subject.id).expect("a query").len(), 2);
+}
+
+/// Three deep, and no deeper: the fourth shelf is refused rather than quietly
+/// flattened into the third.
+#[test]
+fn shelves_stop_at_three_deep() {
+    let (store, _root) = library("shelf-depth");
+    let first = store.create_folder("一", None).expect("a shelf");
+    let second = store
+        .create_folder("二", Some(&first.id))
+        .expect("a shelf on a shelf");
+    let third = store
+        .create_folder("三", Some(&second.id))
+        .expect("a shelf on a shelf on a shelf");
+
+    assert!(matches!(
+        store.create_folder("四", Some(&third.id)),
+        Err(StoreError::ShelfTooDeep)
+    ));
+
+    // And a shelf that would land too deep is refused the same way, with its
+    // own tree counted: this one is two levels tall.
+    let elsewhere = store.create_folder("別", None).expect("a shelf");
+    store
+        .create_folder("別の中", Some(&elsewhere.id))
+        .expect("a shelf on a shelf");
+
+    assert!(matches!(
+        store.move_folder(&elsewhere.id, Some(&second.id)),
+        Err(StoreError::ShelfTooDeep)
+    ));
+
+    // One level higher it fits, because two levels do.
+    store
+        .move_folder(&elsewhere.id, Some(&first.id))
+        .expect("a move");
+}
+
+/// A shelf cannot be put inside itself, however long the way round.
+#[test]
+fn a_shelf_cannot_stand_on_its_own_shelf() {
+    let (store, _root) = library("shelf-rings");
+    let top = store.create_folder("一", None).expect("a shelf");
+    let inside = store
+        .create_folder("二", Some(&top.id))
+        .expect("a shelf on a shelf");
+
+    assert!(matches!(
+        store.move_folder(&top.id, Some(&top.id)),
+        Err(StoreError::ShelfInsideItself)
+    ));
+    assert!(matches!(
+        store.move_folder(&top.id, Some(&inside.id)),
+        Err(StoreError::ShelfInsideItself)
+    ));
+
+    // The other direction is just a move, and the way back out is `None`.
+    store
+        .move_folder(&inside.id, None)
+        .expect("a move to the top level");
+    assert_eq!(
+        store
+            .folder(&inside.id)
+            .expect("a query")
+            .expect("it")
+            .parent_id,
+        None
+    );
+}
+
+/// Throwing away a shelf must not throw away the shelves standing on it, for
+/// the same reason it does not throw away the books: an arrangement is not
+/// what was arranged.
+#[test]
+fn deleting_a_shelf_leaves_what_stood_on_it_at_the_top_level() {
+    let (mut store, root) = library("shelf-promote");
+    let top = store.create_folder("暗号", None).expect("a shelf");
+    let inside = store
+        .create_folder("古典暗号", Some(&top.id))
+        .expect("a shelf on a shelf");
+    let book = store
+        .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
+        .expect("a readable pdf");
+    store.move_book(&book.id, Some(&inside.id)).expect("a move");
+
+    store.remove_folder(&top.id).expect("a removal");
+
+    let shelves = store.folders().expect("a query");
+    assert_eq!(shelves.len(), 1);
+    assert_eq!(shelves[0].id, inside.id);
+    assert_eq!(shelves[0].parent_id, None);
+    assert_eq!(shelves[0].book_count, 1);
+}
+
 /// A book is on one shelf at a time, so moving it is a move and not a copy.
 #[test]
 fn moving_a_book_takes_it_off_the_shelf_it_was_on() {
     let (mut store, root) = library("shelf-move");
-    let from = store.create_folder("読みかけ").expect("a shelf");
-    let to = store.create_folder("読み終わった").expect("a shelf");
+    let from = store.create_folder("読みかけ", None).expect("a shelf");
+    let to = store.create_folder("読み終わった", None).expect("a shelf");
     let book = store
         .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
         .expect("a readable pdf");
@@ -551,7 +718,7 @@ fn moving_a_book_takes_it_off_the_shelf_it_was_on() {
 #[test]
 fn deleting_a_shelf_keeps_its_books_and_drops_its_conversation() {
     let (mut store, root) = library("shelf-delete");
-    let shelf = store.create_folder("暗号").expect("a shelf");
+    let shelf = store.create_folder("暗号", None).expect("a shelf");
     let book = store
         .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
         .expect("a readable pdf");
@@ -578,7 +745,7 @@ fn deleting_a_shelf_keeps_its_books_and_drops_its_conversation() {
 #[test]
 fn a_shelf_conversation_is_not_a_highlight_conversation() {
     let (mut store, root) = library("shelf-conversations");
-    let shelf = store.create_folder("暗号").expect("a shelf");
+    let shelf = store.create_folder("暗号", None).expect("a shelf");
     let book = store
         .add_document(&pdf(&root, "one.pdf", &["まえがき", "本文"]))
         .expect("a readable pdf");
@@ -686,7 +853,7 @@ fn a_library_from_before_shelves_keeps_its_conversations() {
     assert_eq!(messages[1].content, "こうです");
 
     // And the new half works on the migrated file.
-    let shelf = store.create_folder("あとで").expect("a shelf");
+    let shelf = store.create_folder("あとで", None).expect("a shelf");
     store.move_book("b1", Some(&shelf.id)).expect("a move");
     assert_eq!(store.books_in(&shelf.id).expect("a query").len(), 1);
 

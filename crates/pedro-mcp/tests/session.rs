@@ -516,7 +516,7 @@ fn a_book_on_a_shelf_says_which_shelf() {
     {
         let store = Store::open(&root).expect("the same library");
         let book = store.books().expect("books").remove(0);
-        let shelf = store.create_folder("Cryptography").expect("a shelf");
+        let shelf = store.create_folder("Cryptography", None).expect("a shelf");
         store
             .move_book(&book.id, Some(&shelf.id))
             .expect("a book on it");

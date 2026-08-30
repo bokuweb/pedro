@@ -341,7 +341,7 @@ async fn a_book_can_be_put_on_a_shelf(cx: &mut TestAppContext) {
     let first = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
 
     let shelf = pedro.update_in(cx, |pedro, window, cx| {
-        pedro.create_shelf(window, cx);
+        pedro.create_shelf(None, window, cx);
         pedro.library.shelves()[0].id.clone()
     });
     cx.run_until_parked();
@@ -388,7 +388,7 @@ async fn opening_a_shelf_opens_the_panel_it_is_asked_in(cx: &mut TestAppContext)
 
     let book = pedro.read_with(cx, |pedro, _| pedro.library.books()[0].id.clone());
     let shelf = pedro.update_in(cx, |pedro, window, cx| {
-        pedro.create_shelf(window, cx);
+        pedro.create_shelf(None, window, cx);
         let shelf = pedro.library.shelves()[0].id.clone();
         pedro.shelve_book(&book, Some(&shelf), cx);
 
@@ -433,7 +433,7 @@ async fn a_question_to_a_shelf_says_which_book_it_came_from(cx: &mut TestAppCont
 
     // Both books onto one shelf, which is then opened.
     let shelf = pedro.update_in(cx, |pedro, window, cx| {
-        pedro.create_shelf(window, cx);
+        pedro.create_shelf(None, window, cx);
         let shelf = pedro.library.shelves()[0].id.clone();
 
         let books: Vec<String> = pedro
