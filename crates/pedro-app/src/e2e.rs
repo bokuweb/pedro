@@ -902,7 +902,7 @@ async fn the_shelves_go_to_sleep_too(cx: &mut TestAppContext) {
     });
 
     let shelf = pedro.update_in(cx, |pedro, window, cx| {
-        pedro.create_shelf(window, cx);
+        pedro.create_shelf(None, window, cx);
         pedro.library.shelves()[0].id.clone()
     });
     goes_quiet(cx, "making a shelf");
